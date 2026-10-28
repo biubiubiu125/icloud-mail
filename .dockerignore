@@ -1,0 +1,9 @@
+.git
+.github
+data
+.env
+config.json
+*.log
+mailbox-apis.json
+docs
+README.md

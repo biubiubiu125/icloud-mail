@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>iCloud Mail</title>
+<style>
+:root { color-scheme: light; --bg:#f4f6f8; --card:#fff; --ink:#172033; --muted:#5d6b7c; --line:#d8e0e8; --accent:#0f6e6b; --danger:#a33b3b; }
+* { box-sizing: border-box; }
+body { margin:0; font:15px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; background:var(--bg); color:var(--ink); }
+header { display:flex; justify-content:space-between; align-items:center; padding:16px 24px; background:#102a2a; color:#fff; }
+header strong { font-size:18px; }
+main { max-width:1100px; margin:0 auto; padding:20px; }
+section, .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+h2 { margin:0 0 12px; font-size:18px; }
+label { display:block; margin:8px 0 4px; color:var(--muted); }
+input, select, textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font:inherit; }
+textarea { min-height:72px; }
+button { border:0; border-radius:8px; padding:8px 12px; background:var(--accent); color:#fff; cursor:pointer; }
+button.ghost { background:#e7eef2; color:var(--ink); }
+button.danger { background:var(--danger); }
+button.linkish { background:transparent; color:var(--ink); padding:0; font-weight:700; font-size:16px; }
+.row { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; }
+.actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+table { width:100%; border-collapse:collapse; }
+th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); vertical-align:top; }
+.muted { color:var(--muted); }
+.msg { min-height:1.4em; margin:8px 0; }
+.ok { color:#0b6b3a; }
+.bad { color:var(--danger); }
+.hidden { display:none; }
+nav { display:flex; gap:8px; }
+nav button { background:transparent; color:#fff; border:1px solid rgba(255,255,255,.3); }
+code { font-family:Consolas, monospace; font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <strong>iCloud Mail</strong>
+  <nav>
+    <button type="button" id="nav-work">工作台</button>
+    <button type="button" id="nav-settings">设置</button>
+    <button type="button" id="logout" class="hidden">退出</button>
+  </nav>
+</header>
+<main>
+  <section id="auth">
+    <h2 id="auth-title">登录</h2>
+    <div class="row">
+      <div><label>用户名</label><input id="username" autocomplete="username"></div>
+      <div><label>密码</label><input id="password" type="password" autocomplete="current-password"></div>
+    </div>
+    <div class="actions"><button id="auth-submit" type="button">继续</button></div>
+    <p class="msg" id="auth-msg"></p>
+  </section>
+  <div id="app" class="hidden">
+    <section id="page-work">
+      <h2>账号</h2>
+      <div class="row">
+        <div><label>名称</label><input id="account-label"></div>
+        <div><label>Apple ID</label><input id="account-apple"></div>
+        <div><label>密码</label><input id="account-password" type="password"></div>
+        <div><label>代理</label><input id="account-proxy" placeholder="可空，socks5:// 或 http://"></div>
+      </div>
+      <div class="actions"><button id="create-account" type="button">添加账号</button></div>
+      <div id="accounts"></div>
+      <h2>邮箱</h2>
+      <div class="actions"><button id="reload" type="button" class="ghost">刷新</button><button id="export" type="button">导出选中接口</button></div>
+      <div id="mailboxes"></div>
+      <h2>最近事件</h2>
+      <div id="events"></div>
+    </section>
+    <section id="page-settings" class="hidden">
+      <h2>设置</h2>
+      <p class="muted">空着接口密钥保存时，不会清空已有密钥。自动创建默认关闭。本程序只能跑一个实例。</p>
+      <div class="row">
+        <div><label>公开接口</label><select id="public-api"><option value="true">开启</option><option value="false">关闭</option></select></div>
+        <div><label>新的接口密钥</label><input id="api-key" placeholder="留空表示不修改"></div>
+        <div><label>对外地址</label><input id="base-url" placeholder="https://mail.example.com"></div>
+        <div><label>默认关键词</label><input id="keyword"></div>
+        <div><label>租约分钟</label><input id="ttl" type="number" min="1"></div>
+        <div><label>邮件保留天数</label><input id="retention" type="number" min="1"></div>
+        <div><label>自动创建</label><select id="scheduler"><option value="false">关闭</option><option value="true">开启</option></select></div>
+        <div><label>创建间隔秒</label><input id="scheduler-interval" type="number" min="30"></div>
+        <div><label>每轮创建数</label><input id="scheduler-batch" type="number" min="1" max="20"></div>
+        <div><label>后台取信</label><select id="watcher"><option value="true">开启</option><option value="false">关闭</option></select></div>
+        <div><label>取信间隔秒</label><input id="watcher-interval" type="number" min="15"></div>
+        <div><label>Web 取码兜底</label><select id="web-sync"><option value="false">关闭</option><option value="true">开启</option></select></div>
+        <div><label>新的 Apple API Key</label><input id="apple-key" placeholder="留空表示不修改"></div>
+      </div>
+      <div class="actions"><button id="save-settings" type="button">保存设置</button></div>
+      <p class="msg" id="settings-msg"></p>
+    </section>
+  </div>
+  <p class="msg" id="global-msg"></p>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let setup = false;
+async function api(path, options = {}) {
+  const headers = Object.assign({"X-Requested-With":"icloud-mail"}, options.headers || {});
+  if (options.body) headers["Content-Type"] = "application/json";
+  const response = await fetch(path, Object.assign({}, options, {headers}));
+  const text = await response.text();
+  let data = {};
+  if (text) { try { data = JSON.parse(text); } catch { data = {error:text}; } }
+  if (!response.ok || data.success === false) throw new Error(data.error || "操作失败");
+  return data;
+}
+function say(text, ok) {
+  $("global-msg").textContent = text || "";
+  $("global-msg").className = "msg " + (ok ? "ok" : "bad");
+}
+async function refreshAuth() {
+  const status = await api("/api/auth/status");
+  setup = status.setup_required;
+  if (status.authenticated) {
+    $("auth").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    $("logout").classList.remove("hidden");
+    await loadAll();
+    return;
+  }
+  $("auth").classList.remove("hidden");
+  $("app").classList.add("hidden");
+  $("logout").classList.add("hidden");
+  $("auth-title").textContent = setup ? "创建唯一管理员" : "登录";
+  $("auth-submit").textContent = setup ? "创建并进入" : "登录";
+}
+$("auth-submit").onclick = async () => {
+  try {
+    await api(setup ? "/api/auth/setup" : "/api/auth/login", {method:"POST", body:JSON.stringify({username:$("username").value, password:$("password").value})});
+    $("password").value = "";
+    await refreshAuth();
+  } catch (err) { $("auth-msg").textContent = err.message; }
+};
+$("logout").onclick = async () => { await api("/api/auth/logout", {method:"POST", body:"{}"}); location.reload(); };
+$("nav-work").onclick = () => { $("page-work").classList.remove("hidden"); $("page-settings").classList.add("hidden"); };
+$("nav-settings").onclick = () => { $("page-work").classList.add("hidden"); $("page-settings").classList.remove("hidden"); loadSettings(); };
+$("create-account").onclick = async () => {
+  try {
+    await api("/api/accounts", {method:"POST", body:JSON.stringify({label:$("account-label").value, apple_id:$("account-apple").value, password:$("account-password").value, proxy_url:$("account-proxy").value})});
+    $("account-password").value = "";
+    say("账号已添加", true);
+    await loadAll();
+  } catch (err) { say(err.message, false); }
+};
+let openAccountID = "";
+function accountCard(id) {
+  return Array.from(document.querySelectorAll("[data-account]")).find((item) => item.dataset.account === id) || null;
+}
+async function loadAll() {
+  const keep = openAccountID;
+  const accounts = await api("/api/accounts");
+  const mailboxes = await api("/api/mailboxes");
+  const events = await api("/api/events");
+  $("accounts").innerHTML = renderAccounts(accounts.accounts || []);
+  $("mailboxes").innerHTML = renderMailboxes(mailboxes.mailboxes || []);
+  $("events").innerHTML = renderEvents(events.events || []);
+  bind();
+  if (keep) {
+    const card = accountCard(keep);
+    if (!card) return;
+    try { await openAccount(card); }
+    catch (err) {
+      const msg = card.querySelector(".account-msg");
+      msg.textContent = err.message;
+      msg.className = "msg bad";
+    }
+  }
+}
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
+}
+function renderAccounts(items) {
+  if (!items.length) return "<p class='muted'>还没有账号。</p>";
+  return items.map((item) => `
+    <article class="card" data-account="${esc(item.id)}">
+      <button type="button" class="linkish account-toggle">${esc(item.label || item.apple_id || item.id)}</button>
+      <p class="muted">${esc(item.apple_id)} ｜ Web ${item.web_login_saved ? "已保存" : "未保存"} ｜ Apple ${item.apple_account_login_saved ? "已保存" : "未保存"} ｜ IMAP ${item.imap_saved ? "已保存" : "未保存"} ｜ 代理 ${item.has_proxy ? "已设置" : "直连"}${item.reconciliation_required ? " ｜ 待核对" : ""}</p>
+      <div class="account-detail hidden"></div>
+      <p class="msg account-msg"></p>
+    </article>`).join("");
+}
+function proxyOption(value, label, selected) {
+  return `<option value="${value}"${selected === value ? " selected" : ""}>${label}</option>`;
+}
+function renderAccountDetail(item) {
+  const scheme = item.proxy_scheme || "";
+  return `
+    <div class="row">
+      <div><label>名称</label><input class="label" value="${esc(item.label)}"></div>
+      <div><label>Apple ID / 邮箱</label><input class="apple-id" value="${esc(item.apple_id)}" autocomplete="off"></div>
+      <div><label>已存密码</label><input class="saved-password" value="${esc(item.password)}" autocomplete="off"></div>
+    </div>
+    <p class="muted">改邮箱会清除这个账号已保存的登录态。已存密码留空再保存，会清掉密码。代理字段全部留空表示直连。</p>
+    <div class="row">
+      <div><label>代理协议</label><select class="proxy-scheme">${proxyOption("", "不设置", scheme)}${proxyOption("http", "http", scheme)}${proxyOption("https", "https", scheme)}${proxyOption("socks5", "socks5", scheme)}${proxyOption("socks5h", "socks5h", scheme)}</select></div>
+      <div><label>代理 IP</label><input class="proxy-host" value="${esc(item.proxy_host)}" autocomplete="off"></div>
+      <div><label>端口</label><input class="proxy-port" value="${esc(item.proxy_port)}" autocomplete="off"></div>
+      <div><label>代理账号</label><input class="proxy-user" value="${esc(item.proxy_username)}" autocomplete="off"></div>
+      <div><label>代理密码</label><input class="proxy-pass" value="${esc(item.proxy_password)}" autocomplete="off"></div>
+    </div>
+    <div class="actions">
+      <button type="button" class="save-account">保存资料</button>
+      <button type="button" class="ghost clear-proxy">改为直连</button>
+    </div>
+    <div class="row">
+      <div><label>登录密码</label><input class="login-password" type="password" placeholder="手动填写，留空则用已存密码" autocomplete="off"></div>
+      <div><label>验证码</label><input class="code" placeholder="需要时填写"></div>
+      <div><label>IMAP 邮箱</label><input class="imap-email" value="${esc(item.apple_id)}" autocomplete="off"></div>
+      <div><label>App 专用密码</label><input class="imap-password" type="password" placeholder="不回显，需要时重新填写" autocomplete="off"></div>
+      <div><label>创建通道</label><select class="channel"><option value="">自动</option><option value="apple_account">Apple Account</option><option value="icloud_web">iCloud Web</option></select></div>
+    </div>
+    <div class="actions">
+      <button type="button" class="ghost web-start">Web 登录</button>
+      <button type="button" class="ghost web-finish">提交 Web 验证码</button>
+      <button type="button" class="ghost apple-start">Apple 登录</button>
+      <button type="button" class="ghost apple-finish">提交 Apple 验证码</button>
+      <button type="button" class="ghost save-imap">保存 IMAP</button>
+      <button type="button" class="ghost sync">同步远端邮箱</button>
+      ${item.reconciliation_required ? '<button type="button" class="ghost clear-reconciliation">我已在 iCloud 核对，清除待核对</button>' : ""}
+      <button type="button" class="create-box">创建一个邮箱</button>
+      <button type="button" class="danger delete-account">删除账号</button>
+    </div>`;
+}
+async function openAccount(card) {
+  const id = card.dataset.account;
+  const box = card.querySelector(".account-detail");
+  const msg = card.querySelector(".account-msg");
+  if (!box.classList.contains("hidden")) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    if (openAccountID === id) openAccountID = "";
+    return;
+  }
+  document.querySelectorAll("[data-account]").forEach((item) => {
+    const other = item.querySelector(".account-detail");
+    if (!other || item === card) return;
+    other.classList.add("hidden");
+    other.innerHTML = "";
+  });
+  const data = await api(`/api/accounts/${id}`);
+  box.innerHTML = renderAccountDetail(data.account || {});
+  box.classList.remove("hidden");
+  openAccountID = id;
+  bindAccountDetail(card);
+  msg.textContent = "";
+  msg.className = "msg account-msg";
+}
+function renderMailboxes(items) {
+  if (!items.length) return "<p class='muted'>还没有邮箱。</p>";
+  return `<table><thead><tr><th></th><th>邮箱</th><th>状态</th><th>远端</th><th>删除状态</th></tr></thead><tbody>` +
+    items.map((item) => `<tr><td><input type="checkbox" class="pick" value="${esc(item.id)}"></td><td>${esc(item.email)}<br><span class="muted">${esc(item.note)}</span></td><td>${esc(item.status)}</td><td>${esc(item.remote_origin)}<br><span class="muted">${item.icloud_active ? "远端可见" : "远端未见"}</span></td><td>${esc(item.remote_delete_status || "未删除")}<br>${deleteControls(item)}</td></tr>`).join("") +
+    "</tbody></table>";
+}
+function deleteControls(item) {
+  const id = esc(item.id);
+  const status = item.remote_delete_status || "";
+  if (status === "pending") return '<span class="muted">删除进行中，请稍后刷新</span>';
+  if (status === "unknown") {
+    return `<button type="button" class="danger delete-box" data-id="${id}" data-remote="1" data-confirm-unknown="1">已核对，重试远端删除</button> <button type="button" class="ghost delete-box" data-id="${id}" data-remote="0" data-confirm-unknown="1">只清本地</button>`;
+  }
+  if (status === "failed") {
+    return `<button type="button" class="danger delete-box" data-id="${id}" data-remote="1">重试远端删除</button> <button type="button" class="ghost delete-box" data-id="${id}" data-remote="0" data-confirm-failed="1">确认只清本地</button>`;
+  }
+  if (status === "succeeded") {
+    return `<button type="button" class="ghost delete-box" data-id="${id}" data-remote="1">清理本地记录</button>`;
+  }
+  return `<button type="button" class="danger delete-box" data-id="${id}" data-remote="1">远端删除</button> <button type="button" class="ghost delete-box" data-id="${id}" data-remote="0" data-confirm-local="1">确认只清本地</button>`;
+}
+function renderEvents(items) {
+  if (!items.length) return "<p class='muted'>还没有事件。</p>";
+  return items.slice(0, 20).map((item) => `<p><span class="muted">${esc(item.at)}</span> ${esc(item.action)} ${esc(item.message)}</p>`).join("");
+}
+function bind() {
+  document.querySelectorAll("[data-account]").forEach((card) => {
+    const msg = card.querySelector(".account-msg");
+    card.querySelector(".account-toggle").onclick = () => openAccount(card).catch((err) => { msg.textContent = err.message; msg.className = "msg bad"; });
+  });
+  document.querySelectorAll(".delete-box").forEach((button) => {
+    button.onclick = async () => {
+      const remote = button.dataset.remote !== "0";
+      const body = {
+        delete_remote: remote,
+        confirm_unknown: button.dataset.confirmUnknown === "1",
+        confirm_failed: button.dataset.confirmFailed === "1",
+        confirm_local: button.dataset.confirmLocal === "1"
+      };
+      const message = remote ? "将先删除 iCloud 远端邮箱，成功后才删除本地记录。继续吗？" : "只清理本地记录，不会访问 Apple。继续吗？";
+      if (!confirm(message)) return;
+      try { await api(`/api/mailboxes/${button.dataset.id}/delete`, {method:"POST", body:JSON.stringify(body)}); say("已处理", true); await loadAll(); }
+      catch (err) { say(err.message, false); }
+    };
+  });
+}
+function bindAccountDetail(card) {
+  const id = card.dataset.account;
+  const msg = card.querySelector(".account-msg");
+  const note = (text, ok) => { msg.textContent = text; msg.className = "msg " + (ok ? "ok" : "bad"); };
+  card.querySelector(".save-account").onclick = async () => {
+    try {
+      await api(`/api/accounts/${id}`, {method:"PATCH", body:JSON.stringify({
+        label: card.querySelector(".label").value,
+        apple_id: card.querySelector(".apple-id").value,
+        password: card.querySelector(".saved-password").value,
+        update_password: true,
+        update_proxy: true,
+        proxy_scheme: card.querySelector(".proxy-scheme").value,
+        proxy_host: card.querySelector(".proxy-host").value,
+        proxy_port: card.querySelector(".proxy-port").value,
+        proxy_username: card.querySelector(".proxy-user").value,
+        proxy_password: card.querySelector(".proxy-pass").value
+      })});
+      openAccountID = id;
+      await loadAll();
+      const saved = accountCard(id);
+      const detail = saved && saved.querySelector(".account-detail");
+      if (detail && !detail.classList.contains("hidden")) {
+        saved.querySelector(".account-msg").textContent = "资料已保存";
+        saved.querySelector(".account-msg").className = "msg ok";
+      }
+    } catch (err) { note(err.message, false); }
+  };
+  card.querySelector(".clear-proxy").onclick = () => {
+    card.querySelector(".proxy-scheme").value = "";
+    card.querySelector(".proxy-host").value = "";
+    card.querySelector(".proxy-port").value = "";
+    card.querySelector(".proxy-user").value = "";
+    card.querySelector(".proxy-pass").value = "";
+    note("代理已清空，点保存资料后生效", true);
+  };
+  const start = async (path) => {
+    const data = await api(path, {method:"POST", body:JSON.stringify({password:card.querySelector(".login-password").value})});
+    card.dataset.pending = data.login.pending_id || "";
+    note(data.login.needs_2fa ? "需要验证码" : (data.login.message || "已保存"), true);
+  };
+  card.querySelector(".web-start").onclick = () => start(`/api/accounts/${id}/login/web/start`).catch((err) => note(err.message, false));
+    card.querySelector(".apple-start").onclick = () => start(`/api/accounts/${id}/login/apple/start`).catch((err) => note(err.message, false));
+    const finish = async (path) => {
+      await api(path, {method:"POST", body:JSON.stringify({pending_id:card.dataset.pending || "", code:card.querySelector(".code").value})});
+      note("登录态已保存", true);
+      await loadAll();
+    };
+    card.querySelector(".web-finish").onclick = () => finish(`/api/accounts/${id}/login/web/finish`).catch((err) => note(err.message, false));
+    card.querySelector(".apple-finish").onclick = () => finish(`/api/accounts/${id}/login/apple/finish`).catch((err) => note(err.message, false));
+    card.querySelector(".save-imap").onclick = async () => {
+      try { await api(`/api/accounts/${id}/imap`, {method:"POST", body:JSON.stringify({email:card.querySelector(".imap-email").value, app_password:card.querySelector(".imap-password").value})}); note("IMAP 已保存", true); await loadAll(); }
+      catch (err) { note(err.message, false); }
+    };
+    const clear = card.querySelector(".clear-reconciliation");
+    if (clear) {
+      clear.onclick = async () => {
+        if (!confirm("只有确认 iCloud 远端没有遗留邮箱，或已手动处理，才清除待核对。继续吗？")) return;
+        try { await api(`/api/accounts/${id}/reconciliation/clear`, {method:"POST", body:JSON.stringify({confirm:true})}); note("已清除待核对", true); await loadAll(); }
+        catch (err) { note(err.message, false); }
+      };
+    }
+    card.querySelector(".sync").onclick = async () => {
+      try { const data = await api(`/api/accounts/${id}/sync`, {method:"POST", body:"{}"}); note("已导入 " + data.imported + " 个", true); await loadAll(); }
+      catch (err) { note(err.message, false); }
+    };
+    card.querySelector(".create-box").onclick = async () => {
+      try { await api("/api/mailboxes", {method:"POST", body:JSON.stringify({account_id:id, channel:card.querySelector(".channel").value})}); note("已创建", true); await loadAll(); }
+      catch (err) { note(err.message, false); }
+    };
+    card.querySelector(".delete-account").onclick = async () => {
+      if (!confirm("只有没有邮箱的账号才能删除。继续吗？")) return;
+      try { await api(`/api/accounts/${id}`, {method:"DELETE"}); openAccountID = ""; await loadAll(); }
+      catch (err) { note(err.message, false); }
+    };
+}
+$("reload").onclick = () => loadAll().catch((err) => say(err.message, false));
+$("export").onclick = async () => {
+  const ids = Array.from(document.querySelectorAll(".pick:checked")).map((item) => item.value);
+  if (!ids.length) { say("请先勾选邮箱", false); return; }
+  const response = await fetch("/api/mailboxes/export", {method:"POST", headers:{"Content-Type":"application/json","X-Requested-With":"icloud-mail"}, body:JSON.stringify({ids})});
+  if (!response.ok) { const data = await response.json(); say(data.error || "导出失败", false); return; }
+  const blob = await response.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = "mailbox-apis.json";
+  link.click();
+  say("已导出，文件只含邮箱、接口地址和密钥", true);
+};
+async function loadSettings() {
+  const data = await api("/api/settings");
+  const item = data.settings;
+  $("public-api").value = String(item.public_api_enabled);
+  $("base-url").value = item.public_base_url || "";
+  $("keyword").value = item.default_keyword || "OpenAI";
+  $("ttl").value = item.lease_ttl_minutes;
+  $("retention").value = item.message_retention_days;
+  $("scheduler").value = String(item.scheduler_enabled);
+  $("scheduler-interval").value = item.scheduler_interval_seconds;
+  $("scheduler-batch").value = item.scheduler_batch;
+  $("watcher").value = String(item.watcher_enabled);
+  $("watcher-interval").value = item.watcher_interval_seconds;
+  $("web-sync").value = String(item.web_code_sync_enabled);
+}
+$("save-settings").onclick = async () => {
+  try {
+    await api("/api/settings", {method:"PUT", body:JSON.stringify({
+      public_api_enabled: $("public-api").value === "true",
+      api_key: $("api-key").value,
+      public_base_url: $("base-url").value,
+      default_keyword: $("keyword").value,
+      lease_ttl_minutes: Number($("ttl").value),
+      message_retention_days: Number($("retention").value),
+      scheduler_enabled: $("scheduler").value === "true",
+      scheduler_interval_seconds: Number($("scheduler-interval").value),
+      scheduler_batch: Number($("scheduler-batch").value),
+      watcher_enabled: $("watcher").value === "true",
+      watcher_interval_seconds: Number($("watcher-interval").value),
+      web_code_sync_enabled: $("web-sync").value === "true",
+      apple_account_api_key: $("apple-key").value
+    })});
+    $("api-key").value = "";
+    $("apple-key").value = "";
+    $("settings-msg").textContent = "已保存";
+    $("settings-msg").className = "msg ok";
+  } catch (err) {
+    $("settings-msg").textContent = err.message;
+    $("settings-msg").className = "msg bad";
+  }
+};
+refreshAuth().catch((err) => { $("auth-msg").textContent = err.message; });
+</script>
+</body>
+</html>

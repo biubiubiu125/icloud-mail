@@ -1,0 +1,10 @@
+{
+  "http_addr": ":8080",
+  "database_url": "postgres://icloud_mail:change-me@127.0.0.1:5432/icloud_mail?sslmode=disable",
+  "admin_username": "",
+  "admin_password": "",
+  "api_key": "",
+  "public_base_url": "",
+  "cookie_secure": false,
+  "session_hours": 12
+}

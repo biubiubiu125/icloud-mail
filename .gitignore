@@ -1,0 +1,8 @@
+/icloud-mail
+/icloud-mail.exe
+/data/
+.env
+config.json
+*.log
+mailbox-apis.json
+coverage.out

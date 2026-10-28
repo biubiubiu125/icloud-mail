@@ -1,0 +1,1592 @@
+package protocol
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/tls"
+	"encoding/base64"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
+	"net"
+	"net/http"
+	"net/mail"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/biubiubiu125/icloud-mail/internal/domain"
+)
+
+const (
+	defaultICloudIMAPHost     = "imap.mail.me.com"
+	defaultICloudIMAPPort     = 993
+	imapIdleReadTimeout       = 25 * time.Minute
+	imapProxyHandshakeTimeout = 15 * time.Second
+	imapPartialBodyLimit      = 200000
+	imapMaxBodyBytes          = 1000000
+)
+
+var iCloudIMAPDNSServers = []string{"1.1.1.1:53", "8.8.8.8:53", "127.0.0.53:53"}
+var iCloudIMAPFallbackIPv4 = []net.IP{
+	net.IPv4(17, 57, 152, 32),
+	net.IPv4(17, 57, 152, 35),
+	net.IPv4(17, 57, 155, 39),
+	net.IPv4(17, 42, 251, 69),
+	net.IPv4(17, 42, 251, 72),
+	net.IPv4(17, 56, 9, 32),
+	net.IPv4(17, 156, 192, 7),
+}
+
+type iCloudIMAPSyncResult struct {
+	MessagesByMailbox map[string][]ICloudSyncedMessage
+	LastUID           string
+}
+
+func newICloudIMAPDialer(serverName string) tls.Dialer {
+	serverName = firstNonEmpty(strings.TrimSpace(serverName), defaultICloudIMAPHost)
+	return tls.Dialer{
+		NetDialer: &net.Dialer{
+			Timeout:  15 * time.Second,
+			Resolver: newICloudIMAPResolver(iCloudIMAPDNSServers),
+		},
+		Config: &tls.Config{
+			ServerName: serverName,
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+}
+
+func dialICloudIMAPTLS(ctx context.Context, serverName string, port int) (net.Conn, error) {
+	return dialICloudIMAPTLSWithProxy(ctx, serverName, port, "")
+}
+
+func dialICloudIMAPTLSWithProxy(ctx context.Context, serverName string, port int, proxyURL string) (net.Conn, error) {
+	serverName = firstNonEmpty(strings.TrimSpace(serverName), defaultICloudIMAPHost)
+	if port <= 0 {
+		port = defaultICloudIMAPPort
+	}
+	if strings.TrimSpace(proxyURL) != "" {
+		normalized, err := normalizeProxyURL(proxyURL)
+		if err != nil {
+			return nil, err
+		}
+		parsed, err := url.Parse(normalized)
+		if err != nil {
+			return nil, errCode("invalid_proxy_url", "代理地址格式不正确", false)
+		}
+		if isSOCKSProxy(parsed) {
+			return dialICloudIMAPTLSViaSOCKS(ctx, serverName, port, parsed)
+		}
+		return dialICloudIMAPTLSViaHTTPProxy(ctx, serverName, port, parsed)
+	}
+	var lastErr error
+	if strings.EqualFold(strings.TrimSuffix(serverName, "."), defaultICloudIMAPHost) {
+		if conn, err := dialICloudIMAPTLSIPs(ctx, serverName, port, iCloudIMAPFallbackIPv4); err == nil {
+			return conn, nil
+		} else {
+			lastErr = err
+		}
+	}
+	ips, lookupErr := lookupICloudIMAPIPv4(ctx, serverName)
+	if len(appendUniqueIPv4(nil, ips...)) > 0 {
+		if conn, err := dialICloudIMAPTLSIPs(ctx, serverName, port, ips); err == nil {
+			return conn, nil
+		} else if err != nil {
+			lastErr = err
+		}
+	}
+	address := net.JoinHostPort(serverName, strconv.Itoa(port))
+	dialer := newICloudIMAPDialer(serverName)
+	conn, err := dialer.DialContext(ctx, "tcp4", address)
+	if err == nil {
+		return conn, nil
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("IMAP IPv4 直连失败：%v；域名拨号失败：%w", lastErr, err)
+	}
+	if lookupErr != nil {
+		return nil, fmt.Errorf("IMAP DNS-over-TCP 解析失败：%v；域名拨号失败：%w", lookupErr, err)
+	}
+	return nil, err
+}
+
+func dialICloudIMAPTLSViaProxy(ctx context.Context, serverName string, port int, proxyURL string) (net.Conn, error) {
+	return dialICloudIMAPTLSWithProxy(ctx, serverName, port, proxyURL)
+}
+
+func dialICloudIMAPTLSViaSOCKS(ctx context.Context, serverName string, port int, parsed *url.URL) (net.Conn, error) {
+	networkDialer, err := proxyNetworkDialer(parsed)
+	if err != nil {
+		return nil, err
+	}
+	target := net.JoinHostPort(serverName, strconv.Itoa(port))
+	conn, err := networkDialer.DialContext(ctx, "tcp", target)
+	if err != nil {
+		return nil, err
+	}
+	closeConn := true
+	defer func() {
+		if closeConn {
+			_ = conn.Close()
+		}
+	}()
+	if err := conn.SetDeadline(imapProxyDeadline(ctx)); err != nil {
+		return nil, err
+	}
+	tlsConn := tls.Client(conn, &tls.Config{
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
+	})
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
+		return nil, err
+	}
+	closeConn = false
+	return tlsConn, nil
+}
+
+func imapProxyDeadline(ctx context.Context) time.Time {
+	handshakeDeadline := time.Now().Add(imapProxyHandshakeTimeout)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(handshakeDeadline) {
+		handshakeDeadline = deadline
+	}
+	return handshakeDeadline
+}
+
+func dialICloudIMAPTLSViaHTTPProxy(ctx context.Context, serverName string, port int, parsed *url.URL) (net.Conn, error) {
+	address := proxyDialAddress(parsed)
+	dialer := &net.Dialer{Timeout: 15 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	closeConn := true
+	defer func() {
+		if closeConn {
+			_ = conn.Close()
+		}
+	}()
+
+	baseConn := conn
+	handshakeDone := make(chan struct{})
+	var handshakeMu sync.Mutex
+	handshakeComplete := false
+	go func() {
+		select {
+		case <-ctx.Done():
+			handshakeMu.Lock()
+			if !handshakeComplete {
+				_ = baseConn.Close()
+			}
+			handshakeMu.Unlock()
+		case <-handshakeDone:
+		}
+	}()
+	defer func() {
+		handshakeMu.Lock()
+		handshakeComplete = true
+		handshakeMu.Unlock()
+		close(handshakeDone)
+	}()
+
+	if err := conn.SetDeadline(imapProxyDeadline(ctx)); err != nil {
+		return nil, err
+	}
+
+	if strings.EqualFold(parsed.Scheme, "https") {
+		tlsConn := tls.Client(conn, &tls.Config{
+			ServerName: parsed.Hostname(),
+			MinVersion: tls.VersionTLS12,
+		})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			return nil, err
+		}
+		conn = tlsConn
+	}
+
+	target := net.JoinHostPort(serverName, strconv.Itoa(port))
+	request := "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n"
+	if parsed.User != nil {
+		username := parsed.User.Username()
+		password, _ := parsed.User.Password()
+		auth := username + ":" + password
+		request += "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(auth)) + "\r\n"
+	}
+	request += "\r\n"
+	if _, err := io.WriteString(conn, request); err != nil {
+		return nil, err
+	}
+	reader := bufio.NewReader(conn)
+	response, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		return nil, err
+	}
+	if response.Body != nil {
+		_ = response.Body.Close()
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("IMAP 代理 CONNECT 失败：HTTP %d", response.StatusCode)
+	}
+	conn, err = wrapHTTPConnectConn(conn, reader)
+	if err != nil {
+		return nil, err
+	}
+
+	tlsConn := tls.Client(conn, &tls.Config{
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
+	})
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
+		return nil, err
+	}
+	closeConn = false
+	return tlsConn, nil
+}
+
+type prefixConn struct {
+	net.Conn
+	reader io.Reader
+}
+
+func (c *prefixConn) Read(p []byte) (int, error) {
+	if c == nil || c.reader == nil {
+		return 0, net.ErrClosed
+	}
+	return c.reader.Read(p)
+}
+
+func wrapHTTPConnectConn(conn net.Conn, reader *bufio.Reader) (net.Conn, error) {
+	if conn == nil {
+		return nil, errors.New("IMAP 代理连接为空")
+	}
+	if reader == nil || reader.Buffered() == 0 {
+		return conn, nil
+	}
+	leftover := make([]byte, reader.Buffered())
+	if _, err := io.ReadFull(reader, leftover); err != nil {
+		return nil, err
+	}
+	return &prefixConn{Conn: conn, reader: io.MultiReader(bytes.NewReader(leftover), conn)}, nil
+}
+
+func imapDialError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var coded codedError
+	if errors.As(err, &coded) {
+		return err
+	}
+	return errCode("imap_connect_failed", "连接 iCloud IMAP 失败，请检查网络、代理或稍后重试", true)
+}
+
+func proxyDialAddress(proxyURL *url.URL) string {
+	if proxyURL == nil {
+		return ""
+	}
+	host := proxyURL.Hostname()
+	port := proxyURL.Port()
+	if port == "" {
+		switch strings.ToLower(strings.TrimSpace(proxyURL.Scheme)) {
+		case "https":
+			port = "443"
+		case "socks5", "socks5h":
+			port = "1080"
+		default:
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func dialICloudIMAPTLSIPs(ctx context.Context, serverName string, port int, ips []net.IP) (net.Conn, error) {
+	ips = appendUniqueIPv4(nil, ips...)
+	if len(ips) == 0 {
+		return nil, errors.New("no IPv4 addresses")
+	}
+	dialCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	results := make(chan result, len(ips))
+	var wg sync.WaitGroup
+	for _, ip := range ips {
+		ip := ip
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			address := net.JoinHostPort(ip.String(), strconv.Itoa(port))
+			dialer := tls.Dialer{
+				NetDialer: &net.Dialer{Timeout: 5 * time.Second},
+				Config: &tls.Config{
+					ServerName: serverName,
+					MinVersion: tls.VersionTLS12,
+				},
+			}
+			conn, err := dialer.DialContext(dialCtx, "tcp4", address)
+			select {
+			case results <- result{conn: conn, err: err}:
+			case <-dialCtx.Done():
+				if conn != nil {
+					_ = conn.Close()
+				}
+			}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	var errs []string
+	for item := range results {
+		if item.err == nil && item.conn != nil {
+			cancel()
+			return item.conn, nil
+		}
+		if item.conn != nil {
+			_ = item.conn.Close()
+		}
+		if item.err != nil && !errors.Is(item.err, context.Canceled) {
+			errs = append(errs, item.err.Error())
+		}
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	if len(errs) == 0 {
+		return nil, errors.New("all IMAP IPv4 dials failed")
+	}
+	return nil, errors.New(strings.Join(errs, "; "))
+}
+
+func appendUniqueIPv4(base []net.IP, extra ...net.IP) []net.IP {
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	out := make([]net.IP, 0, len(base)+len(extra))
+	for _, ip := range base {
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		key := ip.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, ip)
+	}
+	for _, ip := range extra {
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		key := ip.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, ip)
+	}
+	return out
+}
+
+func newICloudIMAPResolver(servers []string) *net.Resolver {
+	cleaned := make([]string, 0, len(servers))
+	for _, server := range servers {
+		server = strings.TrimSpace(server)
+		if server != "" {
+			cleaned = append(cleaned, server)
+		}
+	}
+	if len(cleaned) == 0 {
+		cleaned = []string{"1.1.1.1:53"}
+	}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			var lastErr error
+			for _, dnsNetwork := range dnsFallbackNetworks(network) {
+				for _, server := range cleaned {
+					dialer := net.Dialer{Timeout: 2 * time.Second}
+					conn, err := dialer.DialContext(ctx, dnsNetwork, server)
+					if err == nil {
+						return conn, nil
+					}
+					lastErr = err
+				}
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, lastErr
+		},
+	}
+}
+
+func lookupICloudIMAPIPv4(ctx context.Context, host string) ([]net.IP, error) {
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	if host == "" {
+		return nil, errors.New("empty host")
+	}
+	var messages []string
+	seen := make(map[string]struct{})
+	var out []net.IP
+	for _, server := range iCloudIMAPDNSServers {
+		server = strings.TrimSpace(server)
+		if server == "" {
+			continue
+		}
+		ips, err := lookupDNSAOverTCP(ctx, server, host)
+		if err != nil {
+			messages = append(messages, server+": "+err.Error())
+			continue
+		}
+		for _, ip := range ips {
+			if ip == nil || ip.To4() == nil {
+				continue
+			}
+			key := ip.String()
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, ip)
+		}
+		if len(out) > 0 {
+			return out, nil
+		}
+	}
+	if len(messages) == 0 {
+		return nil, errors.New("no DNS servers configured")
+	}
+	return nil, errors.New(strings.Join(messages, "; "))
+}
+
+func lookupDNSAOverTCP(ctx context.Context, server, host string) ([]net.IP, error) {
+	queryID := uint16(time.Now().UnixNano())
+	query, err := dnsBuildAQuery(host, queryID)
+	if err != nil {
+		return nil, err
+	}
+	dialer := net.Dialer{Timeout: 3 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp4", server)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	prefix := make([]byte, 2)
+	binary.BigEndian.PutUint16(prefix, uint16(len(query)))
+	if _, err := conn.Write(prefix); err != nil {
+		return nil, err
+	}
+	if _, err := conn.Write(query); err != nil {
+		return nil, err
+	}
+	if _, err := io.ReadFull(conn, prefix); err != nil {
+		return nil, err
+	}
+	size := int(binary.BigEndian.Uint16(prefix))
+	if size <= 0 || size > 65535 {
+		return nil, fmt.Errorf("invalid DNS response size %d", size)
+	}
+	response := make([]byte, size)
+	if _, err := io.ReadFull(conn, response); err != nil {
+		return nil, err
+	}
+	return dnsParseAResponse(response, queryID)
+}
+
+func dnsBuildAQuery(host string, id uint16) ([]byte, error) {
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	if host == "" {
+		return nil, errors.New("empty DNS host")
+	}
+	buf := make([]byte, 12, 64)
+	binary.BigEndian.PutUint16(buf[0:2], id)
+	binary.BigEndian.PutUint16(buf[2:4], 0x0100)
+	binary.BigEndian.PutUint16(buf[4:6], 1)
+	for _, label := range strings.Split(host, ".") {
+		if label == "" {
+			return nil, fmt.Errorf("invalid empty DNS label in %q", host)
+		}
+		if len(label) > 63 {
+			return nil, fmt.Errorf("DNS label too long in %q", host)
+		}
+		buf = append(buf, byte(len(label)))
+		buf = append(buf, label...)
+	}
+	buf = append(buf, 0)
+	buf = binary.BigEndian.AppendUint16(buf, 1)
+	buf = binary.BigEndian.AppendUint16(buf, 1)
+	return buf, nil
+}
+
+func dnsParseAResponse(message []byte, id uint16) ([]net.IP, error) {
+	if len(message) < 12 {
+		return nil, errors.New("short DNS response")
+	}
+	if binary.BigEndian.Uint16(message[0:2]) != id {
+		return nil, errors.New("DNS response id mismatch")
+	}
+	flags := binary.BigEndian.Uint16(message[2:4])
+	if flags&0x000f != 0 {
+		return nil, fmt.Errorf("DNS response rcode %d", flags&0x000f)
+	}
+	qdCount := int(binary.BigEndian.Uint16(message[4:6]))
+	anCount := int(binary.BigEndian.Uint16(message[6:8]))
+	offset := 12
+	var err error
+	for i := 0; i < qdCount; i++ {
+		offset, err = dnsSkipName(message, offset)
+		if err != nil {
+			return nil, err
+		}
+		if offset+4 > len(message) {
+			return nil, errors.New("short DNS question")
+		}
+		offset += 4
+	}
+	var out []net.IP
+	for i := 0; i < anCount; i++ {
+		offset, err = dnsSkipName(message, offset)
+		if err != nil {
+			return nil, err
+		}
+		if offset+10 > len(message) {
+			return nil, errors.New("short DNS answer")
+		}
+		recordType := binary.BigEndian.Uint16(message[offset : offset+2])
+		recordClass := binary.BigEndian.Uint16(message[offset+2 : offset+4])
+		rdLength := int(binary.BigEndian.Uint16(message[offset+8 : offset+10]))
+		offset += 10
+		if offset+rdLength > len(message) {
+			return nil, errors.New("short DNS rdata")
+		}
+		if recordType == 1 && recordClass == 1 && rdLength == 4 {
+			out = append(out, net.IPv4(message[offset], message[offset+1], message[offset+2], message[offset+3]))
+		}
+		offset += rdLength
+	}
+	if len(out) == 0 {
+		return nil, errors.New("DNS response has no A records")
+	}
+	return out, nil
+}
+
+func dnsSkipName(message []byte, offset int) (int, error) {
+	for jumps := 0; ; jumps++ {
+		if jumps > 128 {
+			return 0, errors.New("DNS name compression loop")
+		}
+		if offset >= len(message) {
+			return 0, errors.New("short DNS name")
+		}
+		length := int(message[offset])
+		if length&0xc0 == 0xc0 {
+			if offset+1 >= len(message) {
+				return 0, errors.New("short DNS compression pointer")
+			}
+			return offset + 2, nil
+		}
+		if length&0xc0 != 0 {
+			return 0, errors.New("invalid DNS label")
+		}
+		offset++
+		if length == 0 {
+			return offset, nil
+		}
+		if offset+length > len(message) {
+			return 0, errors.New("short DNS label")
+		}
+		offset += length
+	}
+}
+
+func dnsFallbackNetworks(network string) []string {
+	switch strings.ToLower(strings.TrimSpace(network)) {
+	case "udp", "udp4", "udp6":
+		return []string{"tcp", "udp"}
+	case "tcp", "tcp4", "tcp6":
+		return []string{"tcp", "udp"}
+	case "":
+		return []string{"tcp", "udp"}
+	default:
+		return []string{network, "udp", "tcp"}
+	}
+}
+
+func CheckICloudIMAPLogin(ctx context.Context, email, appPassword string) error {
+	return CheckICloudIMAPLoginWithProxy(ctx, email, appPassword, "")
+}
+
+func CheckICloudIMAPLoginWithProxy(ctx context.Context, email, appPassword, proxyURL string) error {
+	email = strings.TrimSpace(email)
+	appPassword = strings.TrimSpace(appPassword)
+	if email == "" {
+		return errCode("imap_email_missing", "请输入 iCloud 邮箱账号", false)
+	}
+	if appPassword == "" {
+		return errCode("imap_app_password_missing", "请输入 App 专用密码", false)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+
+	conn, err := dialICloudIMAPTLSWithProxy(ctx, defaultICloudIMAPHost, defaultICloudIMAPPort, proxyURL)
+	if err != nil {
+		return imapDialError(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(25 * time.Second))
+
+	reader := bufio.NewReader(conn)
+	greeting, err := reader.ReadString('\n')
+	if err != nil {
+		return errCode("imap_greeting_failed", "读取 iCloud IMAP 欢迎信息失败，请稍后重试", true)
+	}
+	if !strings.Contains(strings.ToUpper(greeting), "OK") {
+		return errCode("imap_greeting_failed", "iCloud IMAP 未就绪："+imapResponseSummary([]string{greeting}), true)
+	}
+
+	loginLines, err := imapCommand(conn, reader, "A001", "LOGIN "+imapQuote(email)+" "+imapQuote(appPassword))
+	if err != nil {
+		return errCode("imap_login_failed", "iCloud IMAP 登录请求失败，请稍后重试", true)
+	}
+	if !imapTaggedOK(loginLines, "A001") {
+		return errCode("imap_login_failed", "iCloud IMAP 登录失败，请确认 iCloud 邮箱账号和 App 专用密码："+imapResponseSummary(loginLines), false)
+	}
+
+	selectLines, err := imapCommand(conn, reader, "A002", "SELECT INBOX")
+	if err != nil {
+		return errCode("imap_select_failed", "打开 iCloud 收件箱失败，请稍后重试", true)
+	}
+	if !imapTaggedOK(selectLines, "A002") {
+		return errCode("imap_select_failed", "打开 iCloud 收件箱失败："+imapResponseSummary(selectLines), true)
+	}
+	_, _ = imapCommand(conn, reader, "A003", "LOGOUT")
+	return nil
+}
+
+func WatchICloudIMAPExists(ctx context.Context, state LoginState, onExists func()) error {
+	state, err := normalizeICloudIMAPState(state)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	conn, err := dialICloudIMAPTLSWithProxy(ctx, state.IMAPHost, state.IMAPPort, state.ProxyURL)
+	if err != nil {
+		return imapDialError(err)
+	}
+	defer conn.Close()
+	stopClose := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopClose:
+		}
+	}()
+	defer close(stopClose)
+
+	reader := bufio.NewReader(conn)
+	greeting, err := reader.ReadString('\n')
+	if err != nil {
+		return errCode("imap_greeting_failed", "读取 iCloud IMAP 欢迎信息失败，请稍后重试", true)
+	}
+	if !strings.Contains(strings.ToUpper(greeting), "OK") {
+		return errCode("imap_greeting_failed", "iCloud IMAP 未就绪："+imapResponseSummary([]string{greeting}), true)
+	}
+	loginLines, err := imapCommand(conn, reader, "A001", "LOGIN "+imapQuote(state.IMAPUsername)+" "+imapQuote(state.IMAPAppPassword))
+	if err != nil {
+		return errCode("imap_login_failed", "iCloud IMAP 登录请求失败，请稍后重试", true)
+	}
+	if !imapTaggedOK(loginLines, "A001") {
+		return errCode("imap_login_failed", "iCloud IMAP 登录失败，请确认 iCloud 邮箱账号和 App 专用密码："+imapResponseSummary(loginLines), false)
+	}
+	selectLines, err := imapCommand(conn, reader, "A002", "SELECT INBOX")
+	if err != nil {
+		return errCode("imap_select_failed", "打开 iCloud 收件箱失败，请稍后重试", true)
+	}
+	if !imapTaggedOK(selectLines, "A002") {
+		return errCode("imap_select_failed", "打开 iCloud 收件箱失败："+imapResponseSummary(selectLines), true)
+	}
+
+	tagIndex := 3
+	for ctx.Err() == nil {
+		tag := fmt.Sprintf("A%03d", tagIndex)
+		tagIndex++
+		if err := imapWaitForExists(ctx, conn, reader, tag); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+		if onExists != nil {
+			onExists()
+		}
+	}
+	return ctx.Err()
+}
+
+func imapWaitForExists(ctx context.Context, conn net.Conn, reader *bufio.Reader, tag string) error {
+	if _, err := fmt.Fprintf(conn, "%s IDLE\r\n", tag); err != nil {
+		return err
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(strings.TrimSpace(line), "+") {
+		return fmt.Errorf("IMAP IDLE 未进入等待状态：%s", strings.TrimSpace(line))
+	}
+	for ctx.Err() == nil {
+		_ = conn.SetReadDeadline(time.Now().Add(imapIdleReadTimeout))
+		line, err = reader.ReadString('\n')
+		if err != nil {
+			_, _ = fmt.Fprint(conn, "DONE\r\n")
+			return err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if imapLineHasExistsEvent(line) {
+			_, _ = fmt.Fprint(conn, "DONE\r\n")
+			_, _ = imapReadUntilTag(reader, tag)
+			return nil
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), tag+" ") {
+			return nil
+		}
+	}
+	_, _ = fmt.Fprint(conn, "DONE\r\n")
+	_, _ = imapReadUntilTag(reader, tag)
+	return ctx.Err()
+}
+
+func imapReadUntilTag(reader *bufio.Reader, tag string) ([]string, error) {
+	lines := make([]string, 0, 4)
+	for i := 0; i < 200; i++ {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return lines, err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		lines = append(lines, strings.TrimSpace(line))
+		if strings.HasPrefix(strings.TrimSpace(line), tag+" ") {
+			return lines, nil
+		}
+	}
+	return lines, errors.New("IMAP IDLE 响应过长")
+}
+
+func imapCommand(conn net.Conn, reader *bufio.Reader, tag, command string) ([]string, error) {
+	lines, _, err := imapCommandWithLiterals(conn, reader, tag, command)
+	return lines, err
+}
+
+func imapCommandWithLiterals(conn net.Conn, reader *bufio.Reader, tag, command string) ([]string, [][]byte, error) {
+	if _, err := fmt.Fprintf(conn, "%s %s\r\n", tag, command); err != nil {
+		return nil, nil, err
+	}
+	lines := make([]string, 0, 4)
+	literals := make([][]byte, 0)
+	for i := 0; i < 200; i++ {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return lines, literals, err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		lines = append(lines, strings.TrimSpace(line))
+		if n, ok := imapLiteralSize(line); ok {
+			body := make([]byte, n)
+			if _, err := io.ReadFull(reader, body); err != nil {
+				return lines, literals, err
+			}
+			literals = append(literals, body)
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), tag+" ") {
+			return lines, literals, nil
+		}
+	}
+	return lines, literals, errors.New("IMAP 响应过长")
+}
+
+func imapTaggedOK(lines []string, tag string) bool {
+	for _, line := range lines {
+		upper := strings.ToUpper(strings.TrimSpace(line))
+		if strings.HasPrefix(upper, strings.ToUpper(tag)+" ") {
+			return strings.Contains(upper, " OK")
+		}
+	}
+	return false
+}
+
+func imapQuote(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	value = strings.ReplaceAll(value, `"`, `\"`)
+	value = strings.ReplaceAll(value, "\r", "")
+	value = strings.ReplaceAll(value, "\n", "")
+	return `"` + value + `"`
+}
+
+func imapResponseSummary(lines []string) string {
+	if len(lines) == 0 {
+		return "远端 IMAP 返回为空"
+	}
+	return "远端 IMAP 返回未就绪"
+}
+
+func SyncICloudIMAPMessages(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error) {
+	result, err := SyncICloudIMAPMessagesWithCursor(ctx, state, mailboxes, after, keyword, maxMessages)
+	if err != nil {
+		return nil, err
+	}
+	return result.MessagesByMailbox, nil
+}
+
+func LatestICloudIMAPUID(ctx context.Context, state LoginState) (string, error) {
+	state, err := normalizeICloudIMAPState(state)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	conn, err := dialICloudIMAPTLSWithProxy(ctx, state.IMAPHost, state.IMAPPort, state.ProxyURL)
+	if err != nil {
+		return "", imapDialError(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+	reader := bufio.NewReader(conn)
+	greeting, err := reader.ReadString('\n')
+	if err != nil {
+		return "", errCode("imap_greeting_failed", "读取 iCloud IMAP 欢迎信息失败，请稍后重试", true)
+	}
+	if !strings.Contains(strings.ToUpper(greeting), "OK") {
+		return "", errCode("imap_greeting_failed", "iCloud IMAP 未就绪："+imapResponseSummary([]string{greeting}), true)
+	}
+	loginLines, err := imapCommand(conn, reader, "A001", "LOGIN "+imapQuote(state.IMAPUsername)+" "+imapQuote(state.IMAPAppPassword))
+	if err != nil {
+		return "", errCode("imap_login_failed", "iCloud IMAP 登录请求失败，请稍后重试", true)
+	}
+	if !imapTaggedOK(loginLines, "A001") {
+		return "", errCode("imap_login_failed", "iCloud IMAP 登录失败，请确认 iCloud 邮箱账号和 App 专用密码："+imapResponseSummary(loginLines), false)
+	}
+	selectLines, err := imapCommand(conn, reader, "A002", "SELECT INBOX")
+	if err != nil {
+		return "", errCode("imap_select_failed", "打开 iCloud 收件箱失败，请稍后重试", true)
+	}
+	if !imapTaggedOK(selectLines, "A002") {
+		return "", errCode("imap_select_failed", "打开 iCloud 收件箱失败："+imapResponseSummary(selectLines), true)
+	}
+	_, _ = imapCommand(conn, reader, "A003", "LOGOUT")
+	uid := imapSelectLastUID(selectLines)
+	if uid <= 0 {
+		return "", nil
+	}
+	return strconv.Itoa(uid), nil
+}
+
+func SyncICloudIMAPMessagesWithCursor(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (iCloudIMAPSyncResult, error) {
+	state, err := normalizeICloudIMAPState(state)
+	if err != nil {
+		return iCloudIMAPSyncResult{}, err
+	}
+	if maxMessages <= 0 {
+		maxMessages = 50
+	}
+	if maxMessages > 200 {
+		maxMessages = 200
+	}
+	if keyword = strings.TrimSpace(keyword); keyword == "" {
+		keyword = "OpenAI"
+	}
+	if len(mailboxes) == 0 {
+		return iCloudIMAPSyncResult{MessagesByMailbox: map[string][]ICloudSyncedMessage{}}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	conn, err := dialICloudIMAPTLSWithProxy(ctx, state.IMAPHost, state.IMAPPort, state.ProxyURL)
+	if err != nil {
+		return iCloudIMAPSyncResult{}, imapDialError(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+
+	reader := bufio.NewReader(conn)
+	greeting, err := reader.ReadString('\n')
+	if err != nil {
+		return iCloudIMAPSyncResult{}, errCode("imap_greeting_failed", "读取 iCloud IMAP 欢迎信息失败，请稍后重试", true)
+	}
+	if !strings.Contains(strings.ToUpper(greeting), "OK") {
+		return iCloudIMAPSyncResult{}, errCode("imap_greeting_failed", "iCloud IMAP 未就绪："+imapResponseSummary([]string{greeting}), true)
+	}
+	loginLines, err := imapCommand(conn, reader, "A001", "LOGIN "+imapQuote(state.IMAPUsername)+" "+imapQuote(state.IMAPAppPassword))
+	if err != nil {
+		return iCloudIMAPSyncResult{}, errCode("imap_login_failed", "iCloud IMAP 登录请求失败，请稍后重试", true)
+	}
+	if !imapTaggedOK(loginLines, "A001") {
+		return iCloudIMAPSyncResult{}, errCode("imap_login_failed", "iCloud IMAP 登录失败，请确认 iCloud 邮箱账号和 App 专用密码："+imapResponseSummary(loginLines), false)
+	}
+	selectLines, err := imapCommand(conn, reader, "A002", "SELECT INBOX")
+	if err != nil {
+		return iCloudIMAPSyncResult{}, errCode("imap_select_failed", "打开 iCloud 收件箱失败，请稍后重试", true)
+	}
+	if !imapTaggedOK(selectLines, "A002") {
+		return iCloudIMAPSyncResult{}, errCode("imap_select_failed", "打开 iCloud 收件箱失败："+imapResponseSummary(selectLines), true)
+	}
+	uidValidity := imapSelectUIDValidity(selectLines)
+	searchLines, err := imapCommand(conn, reader, "A003", imapSearchCommand(state, mailboxes, after, uidValidity))
+	if err != nil {
+		return iCloudIMAPSyncResult{}, errCode("imap_search_failed", "搜索 iCloud IMAP 邮件失败，请稍后重试", true)
+	}
+	if !imapTaggedOK(searchLines, "A003") {
+		return iCloudIMAPSyncResult{}, errCode("imap_search_failed", "搜索 iCloud IMAP 邮件失败："+imapResponseSummary(searchLines), true)
+	}
+	uids := imapSearchUIDs(searchLines)
+	if len(uids) == 0 {
+		_, _ = imapCommand(conn, reader, "A004", "LOGOUT")
+		return iCloudIMAPSyncResult{
+			MessagesByMailbox: map[string][]ICloudSyncedMessage{},
+			LastUID:           imapValidityResetCursor(mailboxes, uidValidity, imapSelectLastUID(selectLines)),
+		}, nil
+	}
+	fetchUIDs, _ := planIMAPFetch(uids, maxMessages)
+
+	fetched := make([]iCloudIMAPFetchedMessage, 0, len(fetchUIDs))
+	tag := 4
+	for _, chunk := range chunkInts(fetchUIDs, 20) {
+		tag++
+		tagName := fmt.Sprintf("A%03d", tag)
+		command := "UID FETCH " + imapUIDSet(chunk) + " (UID BODY.PEEK[]<0." + strconv.Itoa(imapPartialBodyLimit) + ">)"
+		lines, literals, err := imapCommandWithLiterals(conn, reader, tagName, command)
+		if err != nil {
+			return iCloudIMAPSyncResult{}, errCode("imap_fetch_failed", "读取 iCloud IMAP 邮件失败，请稍后重试", true)
+		}
+		if !imapTaggedOK(lines, tagName) {
+			return iCloudIMAPSyncResult{}, errCode("imap_fetch_failed", "读取 iCloud IMAP 邮件失败："+imapResponseSummary(lines), true)
+		}
+		fetched = append(fetched, imapFetchRecords(lines, literals)...)
+	}
+	completed, err := imapCompleteTruncated(conn, reader, &tag, fetched)
+	if err != nil {
+		if CodeOf(err) != "" {
+			return iCloudIMAPSyncResult{}, err
+		}
+		return iCloudIMAPSyncResult{}, errCode("imap_fetch_failed", "读取 iCloud IMAP 邮件失败，请稍后重试", true)
+	}
+	_, _ = imapCommand(conn, reader, fmt.Sprintf("A%03d", tag+1), "LOGOUT")
+	return iCloudIMAPSyncResult{
+		MessagesByMailbox: iCloudIMAPMessagesByMailbox(completed, mailboxes, after, keyword, state.IMAPEmail, state.IMAPUsername),
+		LastUID:           stampIMAPCursor(imapCursorAfterFetch(imapOldestWindow(uids, maxMessages), completed), uidValidity),
+	}, nil
+}
+
+func imapSearchCommand(_ LoginState, mailboxes []Mailbox, after time.Time, mailboxValidity uint64) string {
+	nextUID := 0
+	reset := false
+	for _, mailbox := range mailboxes {
+		validity, uid, ok := domain.ParseIMAPCursor(mailbox.LastSyncUID)
+		if !ok || uid == 0 || uid > uint64(^uint(0)>>1) {
+			nextUID = 0
+			reset = false
+			break
+		}
+		if mailboxValidity != 0 && validity != mailboxValidity {
+			reset = true
+			break
+		}
+		uidNext := int(uid) + 1
+		if nextUID == 0 || uidNext < nextUID {
+			nextUID = uidNext
+		}
+	}
+	if reset {
+		return "UID SEARCH UID 1:*"
+	}
+	if nextUID > 0 {
+		return "UID SEARCH UID " + strconv.Itoa(nextUID) + ":*"
+	}
+	searchAfter := after
+	if searchAfter.IsZero() {
+		searchAfter = time.Now().Add(-24 * time.Hour)
+	}
+	return "UID SEARCH SINCE " + searchAfter.Format("2-Jan-2006")
+}
+
+func imapValidityResetCursor(mailboxes []Mailbox, validity uint64, lastUID int) string {
+	if validity == 0 || lastUID <= 0 {
+		return ""
+	}
+	for _, mailbox := range mailboxes {
+		stored, _, ok := domain.ParseIMAPCursor(mailbox.LastSyncUID)
+		if !ok || stored == validity {
+			continue
+		}
+		return domain.FormatIMAPCursor(validity, uint64(lastUID))
+	}
+	return ""
+}
+
+func stampIMAPCursor(cursor string, validity uint64) string {
+	if validity == 0 {
+		return cursor
+	}
+	_, uid, ok := domain.ParseIMAPCursor(cursor)
+	if !ok {
+		return cursor
+	}
+	return domain.FormatIMAPCursor(validity, uid)
+}
+
+func imapSelectUIDValidity(lines []string) uint64 {
+	for _, line := range lines {
+		upper := strings.ToUpper(line)
+		idx := strings.Index(upper, "UIDVALIDITY")
+		if idx < 0 {
+			continue
+		}
+		tail := line[idx+len("UIDVALIDITY"):]
+		fields := strings.FieldsFunc(tail, func(r rune) bool {
+			return r < '0' || r > '9'
+		})
+		if len(fields) == 0 {
+			continue
+		}
+		validity, err := strconv.ParseUint(fields[0], 10, 64)
+		if err == nil && validity > 0 {
+			return validity
+		}
+	}
+	return 0
+}
+
+func imapSelectLastUID(lines []string) int {
+	for _, line := range lines {
+		upper := strings.ToUpper(line)
+		idx := strings.Index(upper, "UIDNEXT")
+		if idx < 0 {
+			continue
+		}
+		tail := line[idx+len("UIDNEXT"):]
+		fields := strings.FieldsFunc(tail, func(r rune) bool {
+			return r < '0' || r > '9'
+		})
+		if len(fields) == 0 {
+			continue
+		}
+		nextUID, err := strconv.Atoi(fields[0])
+		if err == nil && nextUID > 1 {
+			return nextUID - 1
+		}
+	}
+	return 0
+}
+
+func imapLineHasExistsEvent(line string) bool {
+	parts := strings.Fields(strings.TrimSpace(line))
+	return len(parts) >= 3 && parts[0] == "*" && strings.EqualFold(parts[2], "EXISTS")
+}
+
+type iCloudIMAPFetchedMessage struct {
+	UID        string
+	Raw        []byte
+	Incomplete bool
+}
+
+func iCloudIMAPMessagesByMailbox(fetched []iCloudIMAPFetchedMessage, mailboxes []Mailbox, after time.Time, keyword string, ignoredEmails ...string) map[string][]ICloudSyncedMessage {
+	aliases := make(map[string]string)
+	afterByMailbox := make(map[string]time.Time)
+	ignored := make(map[string]struct{}, len(ignoredEmails))
+	for _, email := range ignoredEmails {
+		if email = normalizeICloudIMAPEmail(email); email != "" {
+			ignored[email] = struct{}{}
+		}
+	}
+	for _, mailbox := range mailboxes {
+		id := strings.TrimSpace(mailbox.ID)
+		email := normalizeICloudIMAPEmail(mailbox.Email)
+		if id == "" || email == "" {
+			continue
+		}
+		if _, skip := ignored[email]; skip {
+			continue
+		}
+		aliases[id] = email
+		// UID search already selected this mail. LastSyncAt must not discard it.
+		afterByMailbox[id] = after
+	}
+	out := make(map[string][]ICloudSyncedMessage, len(aliases))
+	for _, item := range fetched {
+		message, recipients, ok := parseICloudIMAPMessage(item)
+		if !ok {
+			continue
+		}
+		if !looksLikeVerificationText(message.Subject+"\n"+message.Body, keyword) {
+			continue
+		}
+		matchedMailboxIDs := matchingMailboxIDs(recipients, aliases)
+		if len(matchedMailboxIDs) == 0 {
+			continue
+		}
+		for _, mailboxID := range matchedMailboxIDs {
+			if after := afterByMailbox[mailboxID]; !after.IsZero() && message.ReceivedAt.Before(after) {
+				continue
+			}
+			out[mailboxID] = append(out[mailboxID], message)
+		}
+	}
+	for mailboxID := range out {
+		sortMessagesByReceivedAt(out[mailboxID])
+	}
+	return out
+}
+
+func parseICloudIMAPMessage(item iCloudIMAPFetchedMessage) (ICloudSyncedMessage, string, bool) {
+	msg, err := mail.ReadMessage(bytes.NewReader(item.Raw))
+	if err != nil {
+		return ICloudSyncedMessage{}, "", false
+	}
+	bodyBytes, _ := io.ReadAll(io.LimitReader(msg.Body, 1<<20))
+	body := decodeICloudIMAPBody(msg.Header, bodyBytes)
+	subject := decodeMIMEHeader(msg.Header.Get("Subject"))
+	from := decodeMIMEHeader(msg.Header.Get("From"))
+	receivedAt := messageReceivedAt(time.Time{})
+	if date, err := msg.Header.Date(); err == nil {
+		receivedAt = messageReceivedAt(date)
+	}
+	uid := strings.TrimSpace(item.UID)
+	remoteID := "imap"
+	if uid != "" {
+		remoteID += ":" + uid
+	}
+	recipients := imapHeaderText(msg.Header)
+	return ICloudSyncedMessage{
+		RemoteID:   remoteID,
+		MessageID:  strings.TrimSpace(msg.Header.Get("Message-ID")),
+		UID:        uid,
+		Subject:    subject,
+		From:       from,
+		Body:       normalizeMailBody(subject + "\n" + body),
+		ReceivedAt: receivedAt,
+	}, recipients, true
+}
+
+func webMessageID(longHeader, apiMessageID string) string {
+	if value := mailHeaderValue(longHeader, "Message-ID"); value != "" {
+		return value
+	}
+	return strings.TrimSpace(apiMessageID)
+}
+
+func mailHeaderValue(rawHeader, name string) string {
+	rawHeader = strings.TrimSpace(rawHeader)
+	name = strings.TrimSpace(name)
+	if rawHeader == "" || name == "" {
+		return ""
+	}
+	message, err := mail.ReadMessage(strings.NewReader(rawHeader + "\r\n\r\n"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(message.Header.Get(name))
+}
+
+func normalizeICloudIMAPState(state LoginState) (LoginState, error) {
+	email := normalizeICloudIMAPEmail(state.IMAPEmail)
+	if email == "" {
+		email = normalizeICloudIMAPEmail(state.IMAPUsername)
+	}
+	if email == "" {
+		return LoginState{}, errCode("imap_session_missing", "未保存取码登录，请先保存 iCloud 邮箱账号和 App 专用密码", true)
+	}
+	appPassword := strings.TrimSpace(state.IMAPAppPassword)
+	if appPassword == "" {
+		return LoginState{}, errCode("imap_app_password_missing", "取码登录缺少 App 专用密码，请重新保存取码登录", false)
+	}
+	state.IMAPEmail = email
+	state.IMAPUsername = firstNonEmpty(strings.TrimSpace(state.IMAPUsername), email)
+	state.IMAPHost = firstNonEmpty(strings.TrimSpace(state.IMAPHost), defaultICloudIMAPHost)
+	if state.IMAPPort == 0 {
+		state.IMAPPort = defaultICloudIMAPPort
+	}
+	state.IMAPAppPassword = appPassword
+	return state, nil
+}
+
+func imapLiteralSize(line string) (int, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasSuffix(line, "}") {
+		return 0, false
+	}
+	start := strings.LastIndex(line, "{")
+	if start < 0 || start+1 >= len(line) {
+		return 0, false
+	}
+	value := strings.TrimSuffix(line[start+1:], "}")
+	value = strings.TrimSuffix(value, "+")
+	n, err := strconv.Atoi(value)
+	return n, err == nil && n >= 0
+}
+
+func imapSearchUIDs(lines []string) []int {
+	var out []int
+	for _, line := range lines {
+		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(line)), "* SEARCH") {
+			continue
+		}
+		for _, part := range strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "* SEARCH"))) {
+			n, err := strconv.Atoi(part)
+			if err == nil && n > 0 {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+func imapFetchUIDs(lines []string) []int {
+	var out []int
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		for i := 0; i+1 < len(fields); i++ {
+			if strings.EqualFold(strings.Trim(fields[i], "()"), "UID") {
+				value := strings.Trim(fields[i+1], "()")
+				if n, err := strconv.Atoi(value); err == nil && n > 0 {
+					out = append(out, n)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func sortInts(values []int) {
+	for i := 1; i < len(values); i++ {
+		for j := i; j > 0 && values[j] < values[j-1]; j-- {
+			values[j], values[j-1] = values[j-1], values[j]
+		}
+	}
+}
+
+func firstIntValues(values []int, limit int) []int {
+	if limit <= 0 || len(values) <= limit {
+		return values
+	}
+	return values[:limit]
+}
+
+// planIMAPFetch keeps a contiguous oldest window so the cursor can move past
+// mail that is not a verification message. When the search is longer than that
+// window, the newest UIDs are also fetched, but they must not become the cursor.
+// The stored cursor is imapCursorAfterFetch, which stops before a missing or
+// still-truncated UID in that oldest window.
+func planIMAPFetch(uids []int, max int) ([]int, string) {
+	if max <= 0 {
+		max = 50
+	}
+	sorted := append([]int(nil), uids...)
+	sortInts(sorted)
+	if len(sorted) == 0 {
+		return nil, ""
+	}
+	prefix := firstIntValues(sorted, max)
+	cursor := strconv.Itoa(prefix[len(prefix)-1])
+	fetch := append([]int(nil), prefix...)
+	if len(sorted) <= len(prefix) {
+		return fetch, cursor
+	}
+	seen := map[int]struct{}{}
+	for _, n := range prefix {
+		seen[n] = struct{}{}
+	}
+	newest := sorted[len(sorted)-max:]
+	for _, n := range newest {
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		fetch = append(fetch, n)
+	}
+	return fetch, cursor
+}
+
+func imapOldestWindow(uids []int, max int) []int {
+	if max <= 0 {
+		max = 50
+	}
+	sorted := append([]int(nil), uids...)
+	sortInts(sorted)
+	return firstIntValues(sorted, max)
+}
+
+func imapFetchRecords(lines []string, literals [][]byte) []iCloudIMAPFetchedMessage {
+	var out []iCloudIMAPFetchedMessage
+	var current *iCloudIMAPFetchedMessage
+	literalIndex := 0
+	flush := func() {
+		if current == nil {
+			return
+		}
+		out = append(out, *current)
+		current = nil
+	}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || imapIsTagged(trimmed) {
+			continue
+		}
+		if imapIsFetchStart(trimmed) {
+			flush()
+			current = &iCloudIMAPFetchedMessage{Incomplete: true}
+		}
+		if current == nil {
+			continue
+		}
+		if uid := imapLineUID(trimmed); uid != "" && current.UID == "" {
+			current.UID = uid
+		}
+		if n, ok := imapLiteralSize(trimmed); ok {
+			if literalIndex >= len(literals) {
+				current.Incomplete = true
+				continue
+			}
+			raw := literals[literalIndex]
+			literalIndex++
+			current.Raw = raw
+			current.Incomplete = n >= imapPartialBodyLimit || len(raw) >= imapPartialBodyLimit
+			continue
+		}
+		if imapBodyNIL(trimmed) {
+			current.Raw = nil
+			current.Incomplete = false
+		}
+	}
+	flush()
+	return out
+}
+
+func imapCursorAfterFetch(window []int, records []iCloudIMAPFetchedMessage) string {
+	byUID := make(map[string]iCloudIMAPFetchedMessage, len(records))
+	for _, rec := range records {
+		if strings.TrimSpace(rec.UID) == "" {
+			continue
+		}
+		byUID[rec.UID] = rec
+	}
+	cursor := ""
+	for _, uid := range window {
+		rec, ok := byUID[strconv.Itoa(uid)]
+		if !ok || rec.Incomplete {
+			break
+		}
+		cursor = strconv.Itoa(uid)
+	}
+	return cursor
+}
+
+func imapCompleteTruncated(conn net.Conn, reader *bufio.Reader, tag *int, records []iCloudIMAPFetchedMessage) ([]iCloudIMAPFetchedMessage, error) {
+	if conn == nil || reader == nil {
+		return records, nil
+	}
+	if tag == nil {
+		n := 4
+		tag = &n
+	}
+	out := make([]iCloudIMAPFetchedMessage, len(records))
+	copy(out, records)
+	for i := range out {
+		for out[i].Incomplete && strings.TrimSpace(out[i].UID) != "" && len(out[i].Raw) < imapMaxBodyBytes {
+			*tag++
+			tagName := fmt.Sprintf("A%03d", *tag)
+			command := fmt.Sprintf("UID FETCH %s (UID BODY.PEEK[]<%d.%d>)", strings.TrimSpace(out[i].UID), len(out[i].Raw), imapPartialBodyLimit)
+			lines, literals, err := imapCommandWithLiterals(conn, reader, tagName, command)
+			if err != nil {
+				return nil, err
+			}
+			if !imapTaggedOK(lines, tagName) {
+				return nil, errCode("imap_fetch_failed", "读取 iCloud IMAP 邮件失败："+imapResponseSummary(lines), true)
+			}
+			extra, ok := imapRecordByUID(imapFetchRecords(lines, literals), out[i].UID)
+			if !ok || (len(extra.Raw) == 0 && extra.Incomplete) {
+				break
+			}
+			if len(extra.Raw) == 0 {
+				out[i].Incomplete = false
+				break
+			}
+			out[i].Raw = append(append([]byte(nil), out[i].Raw...), extra.Raw...)
+			out[i].Incomplete = extra.Incomplete
+			if extra.Incomplete && len(out[i].Raw) >= imapMaxBodyBytes {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func imapRecordByUID(records []iCloudIMAPFetchedMessage, uid string) (iCloudIMAPFetchedMessage, bool) {
+	uid = strings.TrimSpace(uid)
+	for _, rec := range records {
+		if rec.UID == uid {
+			return rec, true
+		}
+	}
+	return iCloudIMAPFetchedMessage{}, false
+}
+
+func imapIsFetchStart(line string) bool {
+	fields := strings.Fields(line)
+	return len(fields) >= 3 && fields[0] == "*" && strings.EqualFold(fields[2], "FETCH")
+}
+
+func imapIsTagged(line string) bool {
+	fields := strings.Fields(line)
+	return len(fields) > 0 && strings.HasPrefix(fields[0], "A")
+}
+
+func imapLineUID(line string) string {
+	fields := strings.Fields(line)
+	for i := 0; i+1 < len(fields); i++ {
+		if strings.EqualFold(strings.Trim(fields[i], "()"), "UID") {
+			value := strings.Trim(fields[i+1], "()")
+			if n, err := strconv.Atoi(value); err == nil && n > 0 {
+				return strconv.Itoa(n)
+			}
+		}
+	}
+	return ""
+}
+
+func imapBodyNIL(line string) bool {
+	fields := strings.Fields(strings.ToUpper(line))
+	for i, field := range fields {
+		field = strings.Trim(field, "()")
+		if field == "NIL" && i > 0 && strings.Contains(fields[i-1], "BODY") {
+			return true
+		}
+	}
+	return false
+}
+
+// messageReceivedAt keeps a parsed date and does not invent the sync time.
+func messageReceivedAt(parsed time.Time) time.Time {
+	return parsed
+}
+
+func chunkInts(values []int, size int) [][]int {
+	if size <= 0 {
+		size = len(values)
+	}
+	var out [][]int
+	for start := 0; start < len(values); start += size {
+		end := start + size
+		if end > len(values) {
+			end = len(values)
+		}
+		out = append(out, values[start:end])
+	}
+	return out
+}
+
+func imapUIDSet(values []int) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, strconv.Itoa(value))
+	}
+	return strings.Join(parts, ",")
+}
+
+func imapHeaderText(header mail.Header) string {
+	var out []string
+	for key, values := range header {
+		for _, value := range values {
+			out = append(out, key+": "+decodeMIMEHeader(value))
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func decodeMIMEHeader(value string) string {
+	decoded, err := new(mime.WordDecoder).DecodeHeader(value)
+	if err != nil {
+		return strings.TrimSpace(value)
+	}
+	return strings.TrimSpace(decoded)
+}
+
+func decodeICloudIMAPBody(header mail.Header, body []byte) string {
+	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
+	if err != nil {
+		mediaType = strings.ToLower(strings.TrimSpace(header.Get("Content-Type")))
+	}
+	decoded := decodeICloudIMAPTransfer(header.Get("Content-Transfer-Encoding"), body)
+	if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+		boundary := params["boundary"]
+		if boundary == "" {
+			return string(decoded)
+		}
+		reader := multipart.NewReader(bytes.NewReader(decoded), boundary)
+		var parts []string
+		for i := 0; i < 30; i++ {
+			part, err := reader.NextPart()
+			if err != nil {
+				break
+			}
+			partBody, _ := io.ReadAll(io.LimitReader(part, 1<<20))
+			text := decodeICloudIMAPBody(mail.Header(part.Header), partBody)
+			if strings.TrimSpace(text) != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	if strings.HasPrefix(strings.ToLower(mediaType), "text/") || mediaType == "" {
+		return string(decoded)
+	}
+	return string(decoded)
+}
+
+func decodeICloudIMAPTransfer(encoding string, body []byte) []byte {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "quoted-printable":
+		decoded, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(body)))
+		if err == nil {
+			return decoded
+		}
+	case "base64":
+		decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(body)))
+		if err == nil {
+			return decoded
+		}
+	}
+	return body
+}
+
+func sortMessagesByReceivedAt(messages []ICloudSyncedMessage) {
+	for i := 1; i < len(messages); i++ {
+		for j := i; j > 0 && messages[j].ReceivedAt.After(messages[j-1].ReceivedAt); j-- {
+			messages[j], messages[j-1] = messages[j-1], messages[j]
+		}
+	}
+}
