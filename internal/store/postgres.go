@@ -298,6 +298,36 @@ func (s *Store) UpdateAccount(ctx context.Context, item domain.Account, updatePa
 	return nil
 }
 
+func (s *Store) SaveAccountPatch(ctx context.Context, item domain.Account, updatePassword, updateProxy bool, proxyURL string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE accounts SET
+			label = $2,
+			apple_id = $3,
+			apple_password = CASE WHEN $4 THEN $5 ELSE apple_password END,
+			session_json = CASE
+				WHEN lower(btrim(apple_id)) IS DISTINCT FROM lower(btrim($3)) THEN '{}'::jsonb
+				ELSE session_json
+			END,
+			proxy_url = CASE WHEN $6 THEN $7 ELSE proxy_url END,
+			updated_at = $8
+		WHERE id = $1
+	`, item.ID, item.Label, item.AppleID, updatePassword, item.ApplePassword, updateProxy, strings.TrimSpace(proxyURL), item.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperr.New(404, "account_not_found", "账号不存在", false)
+	}
+	if updateProxy {
+		message := "账号代理已更新"
+		if strings.TrimSpace(proxyURL) == "" {
+			message = "账号代理已清空"
+		}
+		_ = s.AddEvent(ctx, domain.Event{At: item.UpdatedAt, Level: "info", Action: "account_proxy_updated", AccountID: item.ID, Message: message})
+	}
+	return nil
+}
+
 func (s *Store) UpdateProxy(ctx context.Context, accountID, proxyURL string, at time.Time) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE accounts SET proxy_url = $2, updated_at = $3 WHERE id = $1

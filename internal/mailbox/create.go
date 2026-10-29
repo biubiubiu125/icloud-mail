@@ -17,7 +17,10 @@ func (s *Service) CreateMailbox(ctx context.Context, accountID, label, note, cha
 	if s.createHalted(accountID) {
 		return domain.Mailbox{}, createPersistFailed()
 	}
-	unlock := s.lockAccount(accountID)
+	unlock, locked := s.tryLockAccount(accountID)
+	if !locked {
+		return domain.Mailbox{}, apperr.New(409, "mailbox_create_in_progress", "这个账号正在处理，请等这次结束再创建", false)
+	}
 	defer unlock()
 	if s.createHalted(accountID) {
 		return domain.Mailbox{}, createPersistFailed()
@@ -167,7 +170,7 @@ func (s *Service) reconcileLocked(ctx context.Context, accountID string) (int, e
 	}
 	n, err := s.importRemotes(ctx, accountID, origin, remotes)
 	if err != nil {
-		return 0, err
+		return n, err
 	}
 	if err := s.clearReconciliationIfSeen(ctx, account, remotes); err != nil {
 		return n, err

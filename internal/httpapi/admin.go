@@ -135,15 +135,9 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		current.ApplePassword = plan.Password
 	}
 	current.UpdatedAt = time.Now()
-	if err := s.DB.UpdateAccount(r.Context(), current, plan.WritePassword); err != nil {
+	if err := s.DB.SaveAccountPatch(r.Context(), current, plan.WritePassword, plan.WriteProxy, plan.ProxyURL); err != nil {
 		writeError(w, s.Logger, err)
 		return
-	}
-	if plan.WriteProxy {
-		if err := s.Mailbox.UpdateProxy(r.Context(), current.ID, plan.ProxyURL); err != nil {
-			writeError(w, s.Logger, err)
-			return
-		}
 	}
 	writeOK(w, map[string]any{"success": true})
 }
@@ -265,10 +259,27 @@ func (s *Server) handleClearReconciliation(w http.ResponseWriter, r *http.Reques
 	writeOK(w, map[string]any{"success": true})
 }
 
+func syncFailureBody(n int, err error) (int, map[string]any) {
+	status, code, message := publicError(err)
+	body := map[string]any{
+		"success": false,
+		"code":    code,
+		"error":   message,
+	}
+	if n > 0 {
+		body["imported"] = n
+	}
+	return status, body
+}
+
 func (s *Server) handleSyncAccount(w http.ResponseWriter, r *http.Request) {
 	n, err := s.Mailbox.SyncAccountMailboxes(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeError(w, s.Logger, err)
+		status, body := syncFailureBody(n, err)
+		if status >= 500 && s.Logger != nil {
+			s.Logger.Error("request failed", "code", body["code"], "status", status, "error", safeErrorText(err))
+		}
+		writeJSON(w, status, body)
 		return
 	}
 	writeOK(w, map[string]any{"success": true, "imported": n})
@@ -398,7 +409,15 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, s.Logger, err)
 		return
 	}
-	writeOK(w, map[string]any{"success": true, "settings": item})
+	writeOK(w, s.settingsPayload(item))
+}
+
+func (s *Server) settingsPayload(item domain.Settings) map[string]any {
+	return map[string]any{
+		"success":                   true,
+		"settings":                  item,
+		"effective_public_base_url": mailbox.EffectivePublicBaseURL(item.PublicBaseURL, s.Config.PublicBaseURL),
+	}
 }
 
 func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {

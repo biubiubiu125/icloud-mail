@@ -262,10 +262,10 @@ func (s *Service) SyncAccountMailboxes(ctx context.Context, accountID string) (i
 			return imported, err
 		}
 		n, err := s.importRemotes(ctx, accountID, origin, remotes)
+		imported += n
 		if err != nil {
 			return imported, err
 		}
-		imported += n
 		if account.ReconciliationRequired && origin == checkOrigin {
 			checked = remotes
 			checkedList = true

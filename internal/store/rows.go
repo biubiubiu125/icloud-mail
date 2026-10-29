@@ -38,6 +38,7 @@ func collectAccounts(rows pgx.Rows) ([]domain.Account, error) {
 		}
 		item.HasPassword = item.ApplePassword != ""
 		item.WebLoginSaved, item.AppleAccountLoginSaved, item.IMAPSaved = sessionFlags(raw)
+		item.IMAPEmail = sessionIMAPEmail(raw)
 		out = append(out, item)
 	}
 	if out == nil {
@@ -74,6 +75,21 @@ func sessionFlags(raw []byte) (web, apple, imap bool) {
 		web = true
 	}
 	return web, apple, imap
+}
+
+func sessionIMAPEmail(raw []byte) string {
+	var session protocol.ICloudSession
+	if len(raw) == 0 || string(raw) == "{}" || string(raw) == "null" {
+		return ""
+	}
+	if err := jsonUnmarshal(raw, &session); err != nil {
+		return ""
+	}
+	state, ok := protocol.IMAPLoginState(session)
+	if !ok {
+		return ""
+	}
+	return state.IMAPEmail
 }
 
 func collectMailboxes(rows pgx.Rows) ([]domain.Mailbox, error) {

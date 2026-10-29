@@ -9,29 +9,37 @@
 :root { color-scheme: light; --bg:#f4f6f8; --card:#fff; --ink:#172033; --muted:#5d6b7c; --line:#d8e0e8; --accent:#0f6e6b; --danger:#a33b3b; }
 * { box-sizing: border-box; }
 body { margin:0; font:15px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; background:var(--bg); color:var(--ink); }
-header { display:flex; justify-content:space-between; align-items:center; padding:16px 24px; background:#102a2a; color:#fff; }
+header { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:16px 24px; background:#102a2a; color:#fff; }
 header strong { font-size:18px; }
-main { max-width:1100px; margin:0 auto; padding:20px; }
+main { max-width:1180px; margin:0 auto; padding:20px; }
 section, .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
 h2 { margin:0 0 12px; font-size:18px; }
 label { display:block; margin:8px 0 4px; color:var(--muted); }
-input, select, textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font:inherit; }
+input, select, textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font:inherit; background:#fff; }
 textarea { min-height:72px; }
 button { border:0; border-radius:8px; padding:8px 12px; background:var(--accent); color:#fff; cursor:pointer; }
 button.ghost { background:#e7eef2; color:var(--ink); }
 button.danger { background:var(--danger); }
 button.linkish { background:transparent; color:var(--ink); padding:0; font-weight:700; font-size:16px; }
+button.small { padding:4px 8px; }
 .row { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; }
-.actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+.actions, .toolbar, .pager { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+.toolbar { align-items:end; }
+.toolbar > div { min-width:140px; }
+.stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin-bottom:16px; }
+.stat { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; }
+.stat strong { display:block; font-size:22px; }
 table { width:100%; border-collapse:collapse; }
 th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); vertical-align:top; }
+.wrap { overflow-x:auto; }
 .muted { color:var(--muted); }
 .msg { min-height:1.4em; margin:8px 0; }
 .ok { color:#0b6b3a; }
 .bad { color:var(--danger); }
 .hidden { display:none; }
-nav { display:flex; gap:8px; }
+nav { display:flex; gap:8px; flex-wrap:wrap; }
 nav button { background:transparent; color:#fff; border:1px solid rgba(255,255,255,.3); }
+nav button.active { background:#fff; color:#102a2a; }
 code { font-family:Consolas, monospace; font-size:13px; }
 </style>
 </head>
@@ -39,8 +47,10 @@ code { font-family:Consolas, monospace; font-size:13px; }
 <header>
   <strong>iCloud Mail</strong>
   <nav>
-    <button type="button" id="nav-work">工作台</button>
-    <button type="button" id="nav-settings">设置</button>
+    <button type="button" id="nav-overview" class="app-nav hidden">概览</button>
+    <button type="button" id="nav-accounts" class="app-nav hidden">账号</button>
+    <button type="button" id="nav-mailboxes" class="app-nav hidden">邮箱池</button>
+    <button type="button" id="nav-settings" class="app-nav hidden">设置</button>
     <button type="button" id="logout" class="hidden">退出</button>
   </nav>
 </header>
@@ -55,28 +65,77 @@ code { font-family:Consolas, monospace; font-size:13px; }
     <p class="msg" id="auth-msg"></p>
   </section>
   <div id="app" class="hidden">
-    <section id="page-work">
-      <h2>账号</h2>
+    <section id="page-overview">
+      <h2>概览</h2>
+      <div class="stats" id="stats"></div>
+      <div class="actions">
+        <button type="button" id="goto-accounts">账号</button>
+        <button type="button" id="goto-mailboxes">邮箱池</button>
+        <button type="button" id="goto-settings" class="ghost">设置</button>
+        <button type="button" id="reload-overview" class="ghost">刷新</button>
+      </div>
+      <div class="card">
+        <h2>最近事件</h2>
+        <div class="toolbar">
+          <div><label>按动作过滤</label><input id="event-filter" placeholder="例如 login_saved"></div>
+          <button type="button" id="copy-events" class="ghost">复制事件</button>
+        </div>
+        <div id="events"></div>
+      </div>
+    </section>
+    <section id="page-accounts" class="hidden">
+      <h2>添加账号</h2>
       <div class="row">
         <div><label>名称</label><input id="account-label"></div>
-        <div><label>Apple ID</label><input id="account-apple"></div>
-        <div><label>密码</label><input id="account-password" type="password"></div>
+        <div><label>Apple ID</label><input id="account-apple" autocomplete="off"></div>
+        <div><label>密码</label><input id="account-password" type="password" autocomplete="new-password"></div>
         <div><label>代理</label><input id="account-proxy" placeholder="可空，socks5:// 或 http://"></div>
       </div>
       <div class="actions"><button id="create-account" type="button">添加账号</button></div>
       <div id="accounts"></div>
-      <h2>邮箱</h2>
-      <div class="actions"><button id="reload" type="button" class="ghost">刷新</button><button id="export" type="button">导出选中接口</button></div>
+      <div class="card">
+        <h2>创建邮箱</h2>
+        <div class="row">
+          <div><label>账号</label><select id="create-account-id"></select></div>
+          <div><label>标签</label><input id="create-label"></div>
+          <div><label>备注</label><input id="create-note"></div>
+          <div><label>通道</label><select id="create-channel"><option value="">自动</option><option value="apple_account">Apple Account</option><option value="icloud_web">iCloud Web</option></select></div>
+        </div>
+        <p class="muted">自动表示已有 Apple Account 登录态就用它，否则用 iCloud Web。一次只创建一个。</p>
+        <p class="muted" id="scheduler-hint">正在读取自动创建设置。</p>
+        <div class="actions">
+          <button id="create-mailbox" type="button">创建一个邮箱</button>
+          <button id="open-settings-from-create" type="button" class="ghost">打开设置</button>
+        </div>
+      </div>
+    </section>
+    <section id="page-mailboxes" class="hidden">
+      <h2>邮箱池</h2>
+      <p class="muted">复制接口不会标记已导出，也不会把密钥显示在表格里。导出选中才会下载 mailbox-apis.json 并标记已导出。</p>
+      <div class="toolbar">
+        <div><label>搜索</label><input id="mb-search" placeholder="邮箱、标签、备注或账号"></div>
+        <div><label>账号</label><select id="mb-account"><option value="">全部</option></select></div>
+        <div><label>状态</label><select id="mb-status"><option value="">全部</option><option value="available">可领取</option><option value="used">已占用</option></select></div>
+        <div><label>导出</label><select id="mb-export"><option value="">全部</option><option value="yes">已导出</option><option value="no">未导出</option></select></div>
+        <div><label>接口开关</label><select id="mb-api"><option value="">全部</option><option value="on">接口开</option><option value="off">接口关</option></select></div>
+        <div><label>删除状态</label><select id="mb-delete"><option value="">全部</option><option value="none">未删除</option><option value="pending">进行中</option><option value="unknown">未知</option><option value="failed">失败</option><option value="succeeded">远端已删</option></select></div>
+        <div><label>每页</label><select id="mb-size"><option value="20">20</option><option value="50">50</option><option value="100">100</option></select></div>
+      </div>
+      <div class="actions">
+        <button type="button" id="reload-mailboxes" class="ghost">刷新</button>
+        <button type="button" id="mb-select-page" class="ghost">全选当前页</button>
+        <button type="button" id="mb-clear" class="ghost">清空选择</button>
+        <button type="button" id="export">导出选中接口</button>
+        <span class="muted" id="mb-picked">已选 0 个</span>
+      </div>
       <div id="mailboxes"></div>
-      <h2>最近事件</h2>
-      <div id="events"></div>
     </section>
     <section id="page-settings" class="hidden">
       <h2>设置</h2>
       <p class="muted">空着接口密钥保存时，不会清空已有密钥。自动创建默认关闭。本程序只能跑一个实例。</p>
       <div class="row">
         <div><label>公开接口</label><select id="public-api"><option value="true">开启</option><option value="false">关闭</option></select></div>
-        <div><label>新的接口密钥</label><input id="api-key" placeholder="留空表示不修改"></div>
+        <div><label>新的接口密钥</label><input id="api-key" placeholder="留空表示不修改" autocomplete="off"></div>
         <div><label>对外地址</label><input id="base-url" placeholder="https://mail.example.com"></div>
         <div><label>默认关键词</label><input id="keyword"></div>
         <div><label>租约分钟</label><input id="ttl" type="number" min="1"></div>
@@ -87,9 +146,9 @@ code { font-family:Consolas, monospace; font-size:13px; }
         <div><label>后台取信</label><select id="watcher"><option value="true">开启</option><option value="false">关闭</option></select></div>
         <div><label>取信间隔秒</label><input id="watcher-interval" type="number" min="15"></div>
         <div><label>Web 取码兜底</label><select id="web-sync"><option value="false">关闭</option><option value="true">开启</option></select></div>
-        <div><label>新的 Apple API Key</label><input id="apple-key" placeholder="留空表示不修改"></div>
+        <div><label>新的 Apple API Key</label><input id="apple-key" placeholder="留空表示不修改" autocomplete="off"></div>
       </div>
-      <div class="actions"><button id="save-settings" type="button">保存设置</button></div>
+      <div class="actions"><button id="save-settings" type="button" disabled>保存设置</button></div>
       <p class="msg" id="settings-msg"></p>
     </section>
   </div>
@@ -98,6 +157,17 @@ code { font-family:Consolas, monospace; font-size:13px; }
 <script>
 const $ = (id) => document.getElementById(id);
 let setup = false;
+let accounts = [];
+let mailboxes = [];
+let events = [];
+let openAccountID = "";
+let mailboxPage = 1;
+let settingsReady = false;
+const selectedIDs = new Set();
+const pendingLogins = {};
+const createLocks = {};
+const viewState = {baseURL:"", publicAPI:false, scheduler:false, schedulerInterval:30, schedulerBatch:1};
+
 async function api(path, options = {}) {
   const headers = Object.assign({"X-Requested-With":"icloud-mail"}, options.headers || {});
   if (options.body) headers["Content-Type"] = "application/json";
@@ -105,12 +175,175 @@ async function api(path, options = {}) {
   const text = await response.text();
   let data = {};
   if (text) { try { data = JSON.parse(text); } catch { data = {error:text}; } }
-  if (!response.ok || data.success === false) throw new Error(data.error || "操作失败");
+  if (!response.ok || data.success === false) {
+    const err = new Error(data.error || "操作失败");
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 function say(text, ok) {
   $("global-msg").textContent = text || "";
   $("global-msg").className = "msg " + (ok ? "ok" : "bad");
+}
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
+}
+function when(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-CN", {hour12:false});
+}
+function statusText(value) {
+  return {available:"可领取", used:"已占用", disabled:"已停用"}[value] || value || "";
+}
+function originText(value) {
+  if (!value) return "未记录";
+  if (value === "ICLOUD_WEB") return "iCloud Web";
+  if (value === "APPLE_ACCOUNT") return "Apple Account";
+  return value;
+}
+function deleteText(value) {
+  return {pending:"删除进行中", unknown:"结果未知", failed:"删除失败", succeeded:"远端已删"}[value] || "未删除";
+}
+function accountName(id) {
+  const item = accounts.find((row) => row.id === id);
+  return item ? (item.label || item.apple_id || item.id) : (id || "");
+}
+function joinAPIURL(base, email, token) {
+  const path = "/api/v1/mailboxes/" + email + "/code?key=" + token;
+  base = String(base || "").trim().replace(/\/+$/, "");
+  return base ? base + path : path;
+}
+function pendingFor(id) {
+  const item = pendingLogins[id];
+  if (!item || !item.id) return null;
+  return item;
+}
+function loginChannel(channel) {
+  return channel === "apple" ? "apple" : "web";
+}
+function applyPendingChannel(card) {
+  const channel = card.dataset.pendingChannel || "";
+  const apply = (button, match) => {
+    if (!button || button.dataset.busy === "1" || button.dataset.hold === "1") return;
+    button.disabled = channel !== "" && !match;
+  };
+  apply(card.querySelector(".web-finish"), channel === "web");
+  apply(card.querySelector(".apple-finish"), channel === "apple");
+}
+function noteAccount(id, text, ok) {
+  const card = accountCard(id);
+  const msg = card && card.querySelector(".account-msg");
+  if (!msg) return;
+  msg.textContent = text;
+  msg.className = "msg " + (ok ? "ok" : "bad");
+}
+async function withBusy(button, action) {
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  button.dataset.busy = "1";
+  let hold = false;
+  try {
+    hold = await action() === true;
+  } finally {
+    delete button.dataset.busy;
+    if (!button.isConnected) return;
+    if (hold) {
+      button.dataset.hold = "1";
+      button.disabled = true;
+      return;
+    }
+    const card = button.closest("[data-account]");
+    if (card && (button.classList.contains("web-finish") || button.classList.contains("apple-finish"))) {
+      applyPendingChannel(card);
+      return;
+    }
+    button.disabled = false;
+  }
+}
+function releaseHeldButtons() {
+  document.querySelectorAll("[data-hold='1']").forEach((button) => {
+    delete button.dataset.hold;
+    button.disabled = false;
+  });
+}
+function releaseCreateHolds() {
+  Object.keys(createLocks).forEach((id) => { if (createLocks[id] === "hold") delete createLocks[id]; });
+}
+function applyCreateLocks() {
+  document.querySelectorAll(".create-box").forEach((button) => {
+    const card = button.closest("[data-account]");
+    const id = card && card.dataset.account;
+    if (!id || button.dataset.busy === "1") return;
+    if (createLocks[id]) {
+      button.disabled = true;
+      if (createLocks[id] === "hold") button.dataset.hold = "1";
+      return;
+    }
+    if (button.dataset.hold === "1") return;
+    button.disabled = false;
+  });
+  const form = $("create-mailbox");
+  const selected = $("create-account-id") && $("create-account-id").value;
+  if (!form || form.dataset.busy === "1") return;
+  if (selected && createLocks[selected]) {
+    form.disabled = true;
+    if (createLocks[selected] === "hold") form.dataset.hold = "1";
+    return;
+  }
+  if (form.dataset.hold === "1") return;
+  form.disabled = false;
+}
+async function refreshAfterWrite(successText, accountID, ok) {
+  const good = ok !== false;
+  try {
+    await loadAll();
+    if (accountID) noteAccount(accountID, successText, good);
+    else say(successText, good);
+    return false;
+  } catch (err) {
+    const text = successText + "，但刷新失败：" + err.message;
+    if (accountID) noteAccount(accountID, text, false);
+    else say(text, false);
+    return true;
+  }
+}
+function setSettingsReady(ready) {
+  settingsReady = ready;
+  const button = $("save-settings");
+  if (button) button.disabled = !ready;
+}
+async function copyText(text) {
+  if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("浏览器不允许写入剪贴板");
+  await navigator.clipboard.writeText(text);
+}
+function rememberPublicSettings(item, effectiveBase) {
+  viewState.baseURL = String(effectiveBase || item.public_base_url || "").trim().replace(/\/+$/, "");
+  viewState.publicAPI = !!item.public_api_enabled;
+  viewState.scheduler = !!item.scheduler_enabled;
+  viewState.schedulerInterval = item.scheduler_interval_seconds;
+  viewState.schedulerBatch = item.scheduler_batch;
+  const hint = $("scheduler-hint");
+  if (!hint) return;
+  hint.textContent = viewState.scheduler
+    ? "自动创建已开启，间隔 " + viewState.schedulerInterval + " 秒，每轮 " + viewState.schedulerBatch + " 个。要改间隔或数量，打开设置。"
+    : "自动创建已关闭。间隔 " + viewState.schedulerInterval + " 秒，每轮 " + viewState.schedulerBatch + " 个。要开启，打开设置。";
+}
+function showPage(name) {
+  ["overview", "accounts", "mailboxes", "settings"].forEach((page) => {
+    $("page-" + page).classList.toggle("hidden", page !== name);
+    $("nav-" + page).classList.toggle("active", page === name);
+  });
+  if (name === "settings") {
+    loadSettings().catch((err) => {
+      $("settings-msg").textContent = err.message;
+      $("settings-msg").className = "msg bad";
+    });
+    return;
+  }
+  loadAll().catch((err) => say(err.message, false));
 }
 async function refreshAuth() {
   const status = await api("/api/auth/status");
@@ -119,66 +352,123 @@ async function refreshAuth() {
     $("auth").classList.add("hidden");
     $("app").classList.remove("hidden");
     $("logout").classList.remove("hidden");
-    await loadAll();
+    document.querySelectorAll(".app-nav").forEach((button) => button.classList.remove("hidden"));
+    showPage("overview");
     return;
   }
   $("auth").classList.remove("hidden");
   $("app").classList.add("hidden");
   $("logout").classList.add("hidden");
+  document.querySelectorAll(".app-nav").forEach((button) => button.classList.add("hidden"));
   $("auth-title").textContent = setup ? "创建唯一管理员" : "登录";
   $("auth-submit").textContent = setup ? "创建并进入" : "登录";
 }
-$("auth-submit").onclick = async () => {
-  try {
-    await api(setup ? "/api/auth/setup" : "/api/auth/login", {method:"POST", body:JSON.stringify({username:$("username").value, password:$("password").value})});
-    $("password").value = "";
-    await refreshAuth();
-  } catch (err) { $("auth-msg").textContent = err.message; }
-};
-$("logout").onclick = async () => { await api("/api/auth/logout", {method:"POST", body:"{}"}); location.reload(); };
-$("nav-work").onclick = () => { $("page-work").classList.remove("hidden"); $("page-settings").classList.add("hidden"); };
-$("nav-settings").onclick = () => { $("page-work").classList.add("hidden"); $("page-settings").classList.remove("hidden"); loadSettings(); };
-$("create-account").onclick = async () => {
-  try {
-    await api("/api/accounts", {method:"POST", body:JSON.stringify({label:$("account-label").value, apple_id:$("account-apple").value, password:$("account-password").value, proxy_url:$("account-proxy").value})});
-    $("account-password").value = "";
-    say("账号已添加", true);
-    await loadAll();
-  } catch (err) { say(err.message, false); }
-};
-let openAccountID = "";
 function accountCard(id) {
   return Array.from(document.querySelectorAll("[data-account]")).find((item) => item.dataset.account === id) || null;
 }
+function takePendingCard() {
+  const card = document.querySelector("[data-pending-login='1']");
+  if (!card) return null;
+  card.remove();
+  return card;
+}
 async function loadAll() {
   const keep = openAccountID;
-  const accounts = await api("/api/accounts");
-  const mailboxes = await api("/api/mailboxes");
-  const events = await api("/api/events");
-  $("accounts").innerHTML = renderAccounts(accounts.accounts || []);
-  $("mailboxes").innerHTML = renderMailboxes(mailboxes.mailboxes || []);
-  $("events").innerHTML = renderEvents(events.events || []);
-  bind();
-  if (keep) {
+  const [accountData, mailboxData, eventData, settingsData] = await Promise.all([
+    api("/api/accounts"),
+    api("/api/mailboxes"),
+    api("/api/events"),
+    api("/api/settings")
+  ]);
+  accounts = accountData.accounts || [];
+  mailboxes = mailboxData.mailboxes || [];
+  events = eventData.events || [];
+  rememberPublicSettings(settingsData.settings || {}, settingsData.effective_public_base_url);
+  const pendingCard = takePendingCard();
+  const alive = new Set(mailboxes.map((item) => item.id));
+  for (const id of Array.from(selectedIDs)) if (!alive.has(id)) selectedIDs.delete(id);
+  renderOverview();
+  renderEvents();
+  renderAccountFilter();
+  renderCreateAccounts();
+  $("accounts").innerHTML = renderAccounts(accounts);
+  if (pendingCard && accountCard(pendingCard.dataset.account)) accountCard(pendingCard.dataset.account).replaceWith(pendingCard);
+  bindAccountToggles();
+  renderMailboxTable();
+  if (keep && (!pendingCard || pendingCard.dataset.account !== keep)) {
     const card = accountCard(keep);
-    if (!card) return;
-    try { await openAccount(card); }
-    catch (err) {
-      const msg = card.querySelector(".account-msg");
-      msg.textContent = err.message;
-      msg.className = "msg bad";
+    if (card) {
+      try { await openAccount(card); }
+      catch (err) {
+        const msg = card.querySelector(".account-msg");
+        if (msg) { msg.textContent = err.message; msg.className = "msg bad"; }
+      }
     }
   }
+  releaseHeldButtons();
+  releaseCreateHolds();
+  applyCreateLocks();
 }
-function esc(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (ch) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
+function renderOverview() {
+  const claimable = mailboxes.filter((item) => item.status === "available" && item.api_active && item.icloud_active && !item.active_lease_id && !item.remote_delete_status).length;
+  const used = mailboxes.filter((item) => item.status === "used" || item.active_lease_id).length;
+  const review = accounts.filter((item) => item.reconciliation_required).length;
+  const broken = mailboxes.filter((item) => ["pending", "unknown", "failed"].includes(item.remote_delete_status)).length;
+  const cards = [
+    ["账号", accounts.length],
+    ["可领取", claimable],
+    ["已占用", used],
+    ["待核对账号", review],
+    ["删除异常", broken],
+    ["公开接口", viewState.publicAPI ? "开启" : "关闭"],
+    ["自动创建", viewState.scheduler ? "开启" : "关闭"]
+  ];
+  $("stats").innerHTML = cards.map((item) => `<div class="stat"><strong>${esc(item[1])}</strong><span class="muted">${esc(item[0])}</span></div>`).join("");
+}
+function visibleEvents() {
+  const query = ($("event-filter").value || "").trim().toLowerCase();
+  return events.filter((item) => !query || String(item.action || "").toLowerCase().includes(query));
+}
+function eventLine(item) {
+  return [when(item.at), item.level, item.action, item.message, item.account_id, item.mailbox_id].filter((part) => part).join(" ");
+}
+function renderEvents() {
+  const items = visibleEvents();
+  if (!items.length) {
+    $("events").innerHTML = "<p class='muted'>还没有事件。</p>";
+    return;
+  }
+  $("events").innerHTML = items.map((item) => `<p>${esc(eventLine(item))}</p>`).join("");
+}
+function renderAccountFilter() {
+  const select = $("mb-account");
+  const current = select.value;
+  const options = ['<option value="">全部</option>'].concat(accounts.map((item) => `<option value="${esc(item.id)}">${esc(item.label || item.apple_id || item.id)}</option>`));
+  select.innerHTML = options.join("");
+  if (current && accounts.some((item) => item.id === current)) select.value = current;
+}
+function renderCreateAccounts() {
+  const select = $("create-account-id");
+  const current = select.value;
+  select.innerHTML = accounts.map((item) => `<option value="${esc(item.id)}">${esc(item.label || item.apple_id || item.id)}</option>`).join("");
+  if (current && accounts.some((item) => item.id === current)) select.value = current;
+}
+function reconciliationText(item) {
+  if (!item.reconciliation_required) return "";
+  const bits = ["待核对"];
+  if (item.reconciliation_error) bits.push(item.reconciliation_error);
+  if (item.reconciliation_origin) bits.push(originText(item.reconciliation_origin));
+  if (item.reconciliation_email) bits.push(item.reconciliation_email);
+  if (item.reconciliation_anonymous_id) bits.push(item.reconciliation_anonymous_id);
+  if (item.reconciliation_at) bits.push(when(item.reconciliation_at));
+  return " ｜ " + bits.join(" ｜ ");
 }
 function renderAccounts(items) {
   if (!items.length) return "<p class='muted'>还没有账号。</p>";
   return items.map((item) => `
     <article class="card" data-account="${esc(item.id)}">
       <button type="button" class="linkish account-toggle">${esc(item.label || item.apple_id || item.id)}</button>
-      <p class="muted">${esc(item.apple_id)} ｜ Web ${item.web_login_saved ? "已保存" : "未保存"} ｜ Apple ${item.apple_account_login_saved ? "已保存" : "未保存"} ｜ IMAP ${item.imap_saved ? "已保存" : "未保存"} ｜ 代理 ${item.has_proxy ? "已设置" : "直连"}${item.reconciliation_required ? " ｜ 待核对" : ""}</p>
+      <p class="muted">${esc(item.apple_id)} ｜ Web ${item.web_login_saved ? "已保存" : "未保存"} ｜ Apple ${item.apple_account_login_saved ? "已保存" : "未保存"} ｜ IMAP ${item.imap_saved ? "已保存" : "未保存"} ｜ 代理 ${item.has_proxy ? "已设置" : "直连"}${esc(reconciliationText(item))}</p>
       <div class="account-detail hidden"></div>
       <p class="msg account-msg"></p>
     </article>`).join("");
@@ -208,8 +498,9 @@ function renderAccountDetail(item) {
     </div>
     <div class="row">
       <div><label>登录密码</label><input class="login-password" type="password" placeholder="手动填写，留空则用已存密码" autocomplete="off"></div>
-      <div><label>验证码</label><input class="code" placeholder="需要时填写"></div>
-      <div><label>IMAP 邮箱</label><input class="imap-email" value="${esc(item.apple_id)}" autocomplete="off"></div>
+      <div><label>验证码方式</label><select class="two-factor"><option value="trusted_device">受信任设备</option><option value="phone">短信</option></select></div>
+      <div><label>验证码</label><input class="code" placeholder="需要时填写" autocomplete="off"></div>
+      <div><label>IMAP 邮箱</label><input class="imap-email" value="${esc(item.imap_email || item.apple_id)}" autocomplete="off"></div>
       <div><label>App 专用密码</label><input class="imap-password" type="password" placeholder="不回显，需要时重新填写" autocomplete="off"></div>
       <div><label>创建通道</label><select class="channel"><option value="">自动</option><option value="apple_account">Apple Account</option><option value="icloud_web">iCloud Web</option></select></div>
     </div>
@@ -229,9 +520,16 @@ async function openAccount(card) {
   const id = card.dataset.account;
   const box = card.querySelector(".account-detail");
   const msg = card.querySelector(".account-msg");
+  const otherPending = document.querySelector("[data-pending-login='1']");
+  if (otherPending && otherPending !== card) {
+    msg.textContent = "另一个账号还有未提交的验证码";
+    msg.className = "msg bad";
+    return;
+  }
   if (!box.classList.contains("hidden")) {
     box.classList.add("hidden");
     box.innerHTML = "";
+    delete card.dataset.pendingLogin;
     if (openAccountID === id) openAccountID = "";
     return;
   }
@@ -249,57 +547,27 @@ async function openAccount(card) {
   msg.textContent = "";
   msg.className = "msg account-msg";
 }
-function renderMailboxes(items) {
-  if (!items.length) return "<p class='muted'>还没有邮箱。</p>";
-  return `<table><thead><tr><th></th><th>邮箱</th><th>状态</th><th>远端</th><th>删除状态</th></tr></thead><tbody>` +
-    items.map((item) => `<tr><td><input type="checkbox" class="pick" value="${esc(item.id)}"></td><td>${esc(item.email)}<br><span class="muted">${esc(item.note)}</span></td><td>${esc(item.status)}</td><td>${esc(item.remote_origin)}<br><span class="muted">${item.icloud_active ? "远端可见" : "远端未见"}</span></td><td>${esc(item.remote_delete_status || "未删除")}<br>${deleteControls(item)}</td></tr>`).join("") +
-    "</tbody></table>";
-}
-function deleteControls(item) {
-  const id = esc(item.id);
-  const status = item.remote_delete_status || "";
-  if (status === "pending") return '<span class="muted">删除进行中，请稍后刷新</span>';
-  if (status === "unknown") {
-    return `<button type="button" class="danger delete-box" data-id="${id}" data-remote="1" data-confirm-unknown="1">已核对，重试远端删除</button> <button type="button" class="ghost delete-box" data-id="${id}" data-remote="0" data-confirm-unknown="1">只清本地</button>`;
-  }
-  if (status === "failed") {
-    return `<button type="button" class="danger delete-box" data-id="${id}" data-remote="1">重试远端删除</button> <button type="button" class="ghost delete-box" data-id="${id}" data-remote="0" data-confirm-failed="1">确认只清本地</button>`;
-  }
-  if (status === "succeeded") {
-    return `<button type="button" class="ghost delete-box" data-id="${id}" data-remote="1">清理本地记录</button>`;
-  }
-  return `<button type="button" class="danger delete-box" data-id="${id}" data-remote="1">远端删除</button> <button type="button" class="ghost delete-box" data-id="${id}" data-remote="0" data-confirm-local="1">确认只清本地</button>`;
-}
-function renderEvents(items) {
-  if (!items.length) return "<p class='muted'>还没有事件。</p>";
-  return items.slice(0, 20).map((item) => `<p><span class="muted">${esc(item.at)}</span> ${esc(item.action)} ${esc(item.message)}</p>`).join("");
-}
-function bind() {
+function bindAccountToggles() {
   document.querySelectorAll("[data-account]").forEach((card) => {
     const msg = card.querySelector(".account-msg");
-    card.querySelector(".account-toggle").onclick = () => openAccount(card).catch((err) => { msg.textContent = err.message; msg.className = "msg bad"; });
-  });
-  document.querySelectorAll(".delete-box").forEach((button) => {
-    button.onclick = async () => {
-      const remote = button.dataset.remote !== "0";
-      const body = {
-        delete_remote: remote,
-        confirm_unknown: button.dataset.confirmUnknown === "1",
-        confirm_failed: button.dataset.confirmFailed === "1",
-        confirm_local: button.dataset.confirmLocal === "1"
-      };
-      const message = remote ? "将先删除 iCloud 远端邮箱，成功后才删除本地记录。继续吗？" : "只清理本地记录，不会访问 Apple。继续吗？";
-      if (!confirm(message)) return;
-      try { await api(`/api/mailboxes/${button.dataset.id}/delete`, {method:"POST", body:JSON.stringify(body)}); say("已处理", true); await loadAll(); }
-      catch (err) { say(err.message, false); }
-    };
+    const toggle = card.querySelector(".account-toggle");
+    if (!toggle) return;
+    toggle.onclick = () => openAccount(card).catch((err) => { msg.textContent = err.message; msg.className = "msg bad"; });
   });
 }
 function bindAccountDetail(card) {
   const id = card.dataset.account;
   const msg = card.querySelector(".account-msg");
   const note = (text, ok) => { msg.textContent = text; msg.className = "msg " + (ok ? "ok" : "bad"); };
-  card.querySelector(".save-account").onclick = async () => {
+  const pending = pendingFor(id);
+  if (pending) {
+    card.dataset.pending = pending.id;
+    card.dataset.pendingChannel = pending.channel;
+    card.dataset.pendingLogin = "1";
+    applyPendingChannel(card);
+    note("还有未提交的验证码，提交完成前不要刷新", true);
+  }
+  card.querySelector(".save-account").onclick = () => withBusy(card.querySelector(".save-account"), async () => {
     try {
       await api(`/api/accounts/${id}`, {method:"PATCH", body:JSON.stringify({
         label: card.querySelector(".label").value,
@@ -314,15 +582,9 @@ function bindAccountDetail(card) {
         proxy_password: card.querySelector(".proxy-pass").value
       })});
       openAccountID = id;
-      await loadAll();
-      const saved = accountCard(id);
-      const detail = saved && saved.querySelector(".account-detail");
-      if (detail && !detail.classList.contains("hidden")) {
-        saved.querySelector(".account-msg").textContent = "资料已保存";
-        saved.querySelector(".account-msg").className = "msg ok";
-      }
+      return refreshAfterWrite("资料已保存", id);
     } catch (err) { note(err.message, false); }
-  };
+  });
   card.querySelector(".clear-proxy").onclick = () => {
     card.querySelector(".proxy-scheme").value = "";
     card.querySelector(".proxy-host").value = "";
@@ -331,62 +593,221 @@ function bindAccountDetail(card) {
     card.querySelector(".proxy-pass").value = "";
     note("代理已清空，点保存资料后生效", true);
   };
-  const start = async (path) => {
-    const data = await api(path, {method:"POST", body:JSON.stringify({password:card.querySelector(".login-password").value})});
+  const start = async (path, channel) => {
+    const data = await api(path, {method:"POST", body:JSON.stringify({password:card.querySelector(".login-password").value, two_factor_method:card.querySelector(".two-factor").value})});
     card.dataset.pending = data.login.pending_id || "";
-    note(data.login.needs_2fa ? "需要验证码" : (data.login.message || "已保存"), true);
-  };
-  card.querySelector(".web-start").onclick = () => start(`/api/accounts/${id}/login/web/start`).catch((err) => note(err.message, false));
-    card.querySelector(".apple-start").onclick = () => start(`/api/accounts/${id}/login/apple/start`).catch((err) => note(err.message, false));
-    const finish = async (path) => {
-      await api(path, {method:"POST", body:JSON.stringify({pending_id:card.dataset.pending || "", code:card.querySelector(".code").value})});
-      note("登录态已保存", true);
-      await loadAll();
-    };
-    card.querySelector(".web-finish").onclick = () => finish(`/api/accounts/${id}/login/web/finish`).catch((err) => note(err.message, false));
-    card.querySelector(".apple-finish").onclick = () => finish(`/api/accounts/${id}/login/apple/finish`).catch((err) => note(err.message, false));
-    card.querySelector(".save-imap").onclick = async () => {
-      try { await api(`/api/accounts/${id}/imap`, {method:"POST", body:JSON.stringify({email:card.querySelector(".imap-email").value, app_password:card.querySelector(".imap-password").value})}); note("IMAP 已保存", true); await loadAll(); }
-      catch (err) { note(err.message, false); }
-    };
-    const clear = card.querySelector(".clear-reconciliation");
-    if (clear) {
-      clear.onclick = async () => {
-        if (!confirm("只有确认 iCloud 远端没有遗留邮箱，或已手动处理，才清除待核对。继续吗？")) return;
-        try { await api(`/api/accounts/${id}/reconciliation/clear`, {method:"POST", body:JSON.stringify({confirm:true})}); note("已清除待核对", true); await loadAll(); }
-        catch (err) { note(err.message, false); }
-      };
+    if (data.login && data.login.needs_2fa) {
+      pendingLogins[id] = {id:card.dataset.pending, channel:loginChannel(channel)};
+      card.dataset.pendingChannel = pendingLogins[id].channel;
+      card.dataset.pendingLogin = "1";
+      applyPendingChannel(card);
+      note("需要验证码", true);
+      return;
     }
-    card.querySelector(".sync").onclick = async () => {
-      try { const data = await api(`/api/accounts/${id}/sync`, {method:"POST", body:"{}"}); note("已导入 " + data.imported + " 个", true); await loadAll(); }
-      catch (err) { note(err.message, false); }
+    delete pendingLogins[id];
+    delete card.dataset.pendingLogin;
+    delete card.dataset.pendingChannel;
+    applyPendingChannel(card);
+    const savedMessage = (data.login && data.login.message) || "已保存";
+    openAccountID = id;
+    return refreshAfterWrite(savedMessage, id);
+  };
+  card.querySelector(".web-start").onclick = () => withBusy(card.querySelector(".web-start"), () => start(`/api/accounts/${id}/login/web/start`, "web")).catch((err) => note(err.message, false));
+  card.querySelector(".apple-start").onclick = () => withBusy(card.querySelector(".apple-start"), () => start(`/api/accounts/${id}/login/apple/start`, "apple")).catch((err) => note(err.message, false));
+  const finish = async (path, channel) => {
+    const pending = pendingFor(id);
+    if (!pending || pending.channel !== channel) {
+      note(channel === "web" ? "当前验证码不属于 Web 登录" : "当前验证码不属于 Apple 登录", false);
+      return;
+    }
+    const submitted = pending.id;
+    await api(path, {method:"POST", body:JSON.stringify({pending_id:submitted, code:card.querySelector(".code").value})});
+    if (pendingFor(id) && pendingFor(id).id !== submitted) {
+      openAccountID = id;
+      applyPendingChannel(card);
+      return refreshAfterWrite("上一条登录已保存，请提交新的验证码", id);
+    }
+    delete pendingLogins[id];
+    delete card.dataset.pending;
+    delete card.dataset.pendingChannel;
+    delete card.dataset.pendingLogin;
+    openAccountID = id;
+    return refreshAfterWrite("登录态已保存", id);
+  };
+  card.querySelector(".web-finish").onclick = async () => {
+    try { await withBusy(card.querySelector(".web-finish"), () => finish(`/api/accounts/${id}/login/web/finish`, "web")); }
+    catch (err) { note(err.message, false); }
+    applyPendingChannel(card);
+  };
+  card.querySelector(".apple-finish").onclick = async () => {
+    try { await withBusy(card.querySelector(".apple-finish"), () => finish(`/api/accounts/${id}/login/apple/finish`, "apple")); }
+    catch (err) { note(err.message, false); }
+    applyPendingChannel(card);
+  };
+  card.querySelector(".save-imap").onclick = () => withBusy(card.querySelector(".save-imap"), async () => {
+    try {
+      await api(`/api/accounts/${id}/imap`, {method:"POST", body:JSON.stringify({email:card.querySelector(".imap-email").value, app_password:card.querySelector(".imap-password").value})});
+      openAccountID = id;
+      return refreshAfterWrite("IMAP 已保存", id);
+    } catch (err) { note(err.message, false); }
+  });
+  const clear = card.querySelector(".clear-reconciliation");
+  if (clear) {
+    clear.onclick = () => {
+      if (!confirm("只有确认 iCloud 远端没有遗留邮箱，或已手动处理，才清除待核对。继续吗？")) return;
+      return withBusy(clear, async () => {
+        try {
+          await api(`/api/accounts/${id}/reconciliation/clear`, {method:"POST", body:JSON.stringify({confirm:true})});
+          openAccountID = id;
+          return refreshAfterWrite("已清除待核对", id);
+        } catch (err) { note(err.message, false); }
+      });
     };
-    card.querySelector(".create-box").onclick = async () => {
-      try { await api("/api/mailboxes", {method:"POST", body:JSON.stringify({account_id:id, channel:card.querySelector(".channel").value})}); note("已创建", true); await loadAll(); }
-      catch (err) { note(err.message, false); }
-    };
-    card.querySelector(".delete-account").onclick = async () => {
-      if (!confirm("只有没有邮箱的账号才能删除。继续吗？")) return;
-      try { await api(`/api/accounts/${id}`, {method:"DELETE"}); openAccountID = ""; await loadAll(); }
-      catch (err) { note(err.message, false); }
-    };
+  }
+  card.querySelector(".sync").onclick = () => withBusy(card.querySelector(".sync"), async () => {
+    try {
+      const data = await api(`/api/accounts/${id}/sync`, {method:"POST", body:"{}"});
+      openAccountID = id;
+      return refreshAfterWrite("已导入 " + data.imported + " 个", id);
+    } catch (err) {
+      const imported = err.data && Number(err.data.imported);
+      if (imported > 0) {
+        openAccountID = id;
+        return refreshAfterWrite("已导入 " + imported + " 个，但同步未完成：" + err.message, id, false);
+      }
+      note(err.message, false);
+    }
+  });
+  card.querySelector(".create-box").onclick = () => {
+    const accountID = id;
+    if (createLocks[accountID]) { note("这个账号正在创建邮箱，请等这次结束再创建", false); return; }
+    return withBusy(card.querySelector(".create-box"), async () => {
+      createLocks[accountID] = "busy";
+      applyCreateLocks();
+      try {
+        await api("/api/mailboxes", {method:"POST", body:JSON.stringify({account_id:accountID, channel:card.querySelector(".channel").value})});
+        openAccountID = accountID;
+        createLocks[accountID] = "hold";
+        const hold = await refreshAfterWrite("已创建", accountID);
+        if (!hold) delete createLocks[accountID];
+        applyCreateLocks();
+        return hold;
+      } catch (err) {
+        delete createLocks[accountID];
+        applyCreateLocks();
+        note(err.message, false);
+      }
+    });
+  };
+  card.querySelector(".delete-account").onclick = () => {
+    if (!confirm("只有没有邮箱的账号才能删除。继续吗？")) return;
+    return withBusy(card.querySelector(".delete-account"), async () => {
+      try {
+        await api(`/api/accounts/${id}`, {method:"DELETE"});
+        delete pendingLogins[id];
+        openAccountID = "";
+        return refreshAfterWrite("账号已删除");
+      } catch (err) { note(err.message, false); }
+    });
+  };
 }
-$("reload").onclick = () => loadAll().catch((err) => say(err.message, false));
-$("export").onclick = async () => {
-  const ids = Array.from(document.querySelectorAll(".pick:checked")).map((item) => item.value);
-  if (!ids.length) { say("请先勾选邮箱", false); return; }
-  const response = await fetch("/api/mailboxes/export", {method:"POST", headers:{"Content-Type":"application/json","X-Requested-With":"icloud-mail"}, body:JSON.stringify({ids})});
-  if (!response.ok) { const data = await response.json(); say(data.error || "导出失败", false); return; }
-  const blob = await response.blob();
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = "mailbox-apis.json";
-  link.click();
-  say("已导出，文件只含邮箱、接口地址和密钥", true);
-};
+function filteredMailboxes() {
+  const query = ($("mb-search").value || "").trim().toLowerCase();
+  const accountID = $("mb-account").value;
+  const status = $("mb-status").value;
+  const exported = $("mb-export").value;
+  const apiState = $("mb-api").value;
+  const deletion = $("mb-delete").value;
+  return mailboxes.filter((item) => {
+    if (accountID && item.account_id !== accountID) return false;
+    if (status && item.status !== status) return false;
+    if (exported === "yes" && !item.api_exported_at) return false;
+    if (exported === "no" && item.api_exported_at) return false;
+    if (apiState === "on" && !item.api_active) return false;
+    if (apiState === "off" && item.api_active) return false;
+    const remoteDelete = item.remote_delete_status || "";
+    if (deletion === "none" && remoteDelete) return false;
+    if (deletion && deletion !== "none" && remoteDelete !== deletion) return false;
+    if (!query) return true;
+    return [item.email, item.label, item.note, accountName(item.account_id)].join(" ").toLowerCase().includes(query);
+  });
+}
+function deleteControls(item) {
+  const id = esc(item.id);
+  const status = item.remote_delete_status || "";
+  if (status === "pending") return '<span class="muted">删除进行中，请稍后刷新</span>';
+  if (status === "unknown") {
+    return `<button type="button" class="danger small delete-box" data-id="${id}" data-remote="1" data-confirm-unknown="1">已核对，重试远端删除</button> <button type="button" class="ghost small delete-box" data-id="${id}" data-remote="0" data-confirm-unknown="1">只清本地</button>`;
+  }
+  if (status === "failed") {
+    return `<button type="button" class="danger small delete-box" data-id="${id}" data-remote="1">重试远端删除</button> <button type="button" class="ghost small delete-box" data-id="${id}" data-remote="0" data-confirm-failed="1">确认只清本地</button>`;
+  }
+  if (status === "succeeded") {
+    return `<button type="button" class="ghost small delete-box" data-id="${id}" data-remote="1" data-local-cleanup="1">清理本地记录</button>`;
+  }
+  return `<button type="button" class="danger small delete-box" data-id="${id}" data-remote="1">远端删除</button> <button type="button" class="ghost small delete-box" data-id="${id}" data-remote="0" data-confirm-local="1">确认只清本地</button>`;
+}
+function renderMailboxTable() {
+  const picked = $("mb-picked");
+  if (picked) picked.textContent = "已选 " + selectedIDs.size + " 个";
+  if (!mailboxes.length) {
+    $("mailboxes").innerHTML = "<p class='muted'>还没有邮箱。</p>";
+    return;
+  }
+  const size = Number($("mb-size").value) || 20;
+  const rows = filteredMailboxes();
+  const pages = Math.max(1, Math.ceil(rows.length / size));
+  if (mailboxPage > pages) mailboxPage = pages;
+  if (mailboxPage < 1) mailboxPage = 1;
+  const pageRows = rows.slice((mailboxPage - 1) * size, mailboxPage * size);
+  if (!pageRows.length) {
+    $("mailboxes").innerHTML = "<p class='muted'>没有符合条件的邮箱。</p>";
+    return;
+  }
+  const body = pageRows.map((item) => {
+    const checked = selectedIDs.has(item.id) ? " checked" : "";
+    const remoteBits = [originText(item.remote_origin), (!item.icloud_active || item.remote_missing_at) ? "远端未见" : "远端可见"];
+    if (item.active_lease_id) remoteBits.push("租约占用");
+    if (item.remote_missing_at) remoteBits.push(when(item.remote_missing_at));
+    return `<tr>
+      <td><input type="checkbox" class="pick" value="${esc(item.id)}"${checked}></td>
+      <td>${esc(item.label || "未命名")}${item.note ? `<br><span class="muted">${esc(item.note)}</span>` : ""}</td>
+      <td>${esc(item.email)}</td>
+      <td>${esc(accountName(item.account_id))}</td>
+      <td>${esc(statusText(item.status))}</td>
+      <td>${item.api_active ? "接口开" : "接口关"}<br><button type="button" class="ghost small toggle-api" data-id="${esc(item.id)}">${item.api_active ? "停用接口" : "启用接口"}</button></td>
+      <td>${esc(remoteBits.join(" · "))}</td>
+      <td>${item.api_exported_at ? "已导出 " + esc(when(item.api_exported_at)) : "未导出"}</td>
+      <td>${esc(deleteText(item.remote_delete_status))}${item.remote_delete_error ? `<br><span class="muted">${esc(item.remote_delete_error)}</span>` : ""}<br>${deleteControls(item)}</td>
+      <td>${item.last_sync_at ? esc(when(item.last_sync_at)) : "未同步"}</td>
+      <td>
+        <button type="button" class="ghost small copy-email" data-id="${esc(item.id)}">复制邮箱</button>
+        <button type="button" class="ghost small copy-api" data-id="${esc(item.id)}">复制接口</button>
+        <button type="button" class="ghost small edit-box" data-id="${esc(item.id)}">修改</button>
+        <div class="edit-form hidden">
+          <label>标签</label><input class="edit-label" value="${esc(item.label)}">
+          <label>备注</label><input class="edit-note" value="${esc(item.note)}">
+          <button type="button" class="small save-mailbox" data-id="${esc(item.id)}">保存</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+  $("mailboxes").innerHTML = `<div class="wrap"><table><thead><tr><th></th><th>标签</th><th>邮箱</th><th>所属账号</th><th>状态</th><th>接口开关</th><th>远端</th><th>导出</th><th>删除状态</th><th>最近同步</th><th>操作</th></tr></thead><tbody>${body}</tbody></table></div>
+    <div class="pager"><button type="button" class="ghost small page-prev">上一页</button><span>第 ${mailboxPage} / ${pages} 页，共 ${rows.length} 个</span><button type="button" class="ghost small page-next">下一页</button></div>`;
+  const prev = $("mailboxes").querySelector(".page-prev");
+  const next = $("mailboxes").querySelector(".page-next");
+  prev.disabled = mailboxPage <= 1;
+  next.disabled = mailboxPage >= pages;
+  prev.onclick = () => { if (mailboxPage > 1) { mailboxPage -= 1; renderMailboxTable(); } };
+  next.onclick = () => { if (mailboxPage < pages) { mailboxPage += 1; renderMailboxTable(); } };
+}
+function mailboxByID(id) {
+  return mailboxes.find((item) => item.id === id) || null;
+}
 async function loadSettings() {
+  setSettingsReady(false);
   const data = await api("/api/settings");
-  const item = data.settings;
+  const item = data.settings || {};
   $("public-api").value = String(item.public_api_enabled);
   $("base-url").value = item.public_base_url || "";
   $("keyword").value = item.default_keyword || "OpenAI";
@@ -398,8 +819,183 @@ async function loadSettings() {
   $("watcher").value = String(item.watcher_enabled);
   $("watcher-interval").value = item.watcher_interval_seconds;
   $("web-sync").value = String(item.web_code_sync_enabled);
+  rememberPublicSettings(item, data.effective_public_base_url);
+  renderOverview();
+  setSettingsReady(true);
 }
+$("auth-submit").onclick = async () => {
+  try {
+    await api(setup ? "/api/auth/setup" : "/api/auth/login", {method:"POST", body:JSON.stringify({username:$("username").value, password:$("password").value})});
+    $("password").value = "";
+    await refreshAuth();
+  } catch (err) { $("auth-msg").textContent = err.message; }
+};
+$("logout").onclick = async () => { await api("/api/auth/logout", {method:"POST", body:"{}"}); location.reload(); };
+$("nav-overview").onclick = () => showPage("overview");
+$("nav-accounts").onclick = () => showPage("accounts");
+$("nav-mailboxes").onclick = () => showPage("mailboxes");
+$("nav-settings").onclick = () => showPage("settings");
+$("goto-accounts").onclick = () => showPage("accounts");
+$("goto-mailboxes").onclick = () => showPage("mailboxes");
+$("goto-settings").onclick = () => showPage("settings");
+$("open-settings-from-create").onclick = () => showPage("settings");
+$("reload-overview").onclick = () => loadAll().catch((err) => say(err.message, false));
+$("reload-mailboxes").onclick = () => loadAll().catch((err) => say(err.message, false));
+$("create-account").onclick = () => withBusy($("create-account"), async () => {
+  try {
+    await api("/api/accounts", {method:"POST", body:JSON.stringify({label:$("account-label").value, apple_id:$("account-apple").value, password:$("account-password").value, proxy_url:$("account-proxy").value})});
+    $("account-password").value = "";
+    return refreshAfterWrite("账号已添加");
+  } catch (err) { say(err.message, false); }
+});
+$("create-account-id").addEventListener("change", applyCreateLocks);
+$("create-mailbox").onclick = () => {
+  const accountID = $("create-account-id").value;
+  if (!accountID) { say("请先添加账号", false); return; }
+  if (createLocks[accountID]) { say("这个账号正在创建邮箱，请等这次结束再创建", false); return; }
+  return withBusy($("create-mailbox"), async () => {
+    createLocks[accountID] = "busy";
+    applyCreateLocks();
+    try {
+      await api("/api/mailboxes", {method:"POST", body:JSON.stringify({
+        account_id: accountID,
+        label: $("create-label").value,
+        note: $("create-note").value,
+        channel: $("create-channel").value
+      })});
+      createLocks[accountID] = "hold";
+      const hold = await refreshAfterWrite("已创建");
+      if (!hold) delete createLocks[accountID];
+      applyCreateLocks();
+      return hold;
+    } catch (err) {
+      delete createLocks[accountID];
+      applyCreateLocks();
+      say(err.message, false);
+    }
+  });
+};
+["mb-search", "mb-account", "mb-status", "mb-export", "mb-api", "mb-delete"].forEach((id) => {
+  $(id).addEventListener("input", () => { mailboxPage = 1; renderMailboxTable(); });
+  $(id).addEventListener("change", () => { mailboxPage = 1; renderMailboxTable(); });
+});
+$("mb-size").onchange = () => { mailboxPage = 1; renderMailboxTable(); };
+$("mb-select-page").onclick = () => {
+  document.querySelectorAll("#mailboxes .pick").forEach((box) => {
+    box.checked = true;
+    selectedIDs.add(box.value);
+  });
+  renderMailboxTable();
+};
+$("mb-clear").onclick = () => {
+  selectedIDs.clear();
+  renderMailboxTable();
+};
+$("event-filter").addEventListener("input", renderEvents);
+$("copy-events").onclick = async () => {
+  const text = visibleEvents().map(eventLine).join("\n");
+  if (!text) { say("没有可复制的事件", false); return; }
+  try { await copyText(text); say("事件已复制", true); }
+  catch (err) { say(err.message, false); }
+};
+$("mailboxes").addEventListener("change", (event) => {
+  if (!event.target.classList || !event.target.classList.contains("pick")) return;
+  if (event.target.checked) selectedIDs.add(event.target.value);
+  else selectedIDs.delete(event.target.value);
+  if ($("mb-picked")) $("mb-picked").textContent = "已选 " + selectedIDs.size + " 个";
+});
+$("mailboxes").addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  if (button.classList.contains("edit-box")) {
+    const form = button.parentElement.querySelector(".edit-form");
+    if (form) form.classList.toggle("hidden");
+    return;
+  }
+  const id = button.dataset.id;
+  const item = mailboxByID(id);
+  if (button.classList.contains("copy-email")) {
+    if (!item) return;
+    try { await copyText(item.email || ""); say("邮箱已复制", true); }
+    catch (err) { say(err.message, false); }
+    return;
+  }
+  if (button.classList.contains("copy-api")) {
+    if (!item || !item.api_token) { say("不能复制，这个邮箱没有接口密钥", false); return; }
+    try { await copyText(joinAPIURL(viewState.baseURL, item.email, item.api_token)); say("接口地址已复制，未标记已导出", true); }
+    catch (err) { say(err.message, false); }
+    return;
+  }
+  if (button.classList.contains("toggle-api")) {
+    if (!item) return;
+    await withBusy(button, async () => {
+      try {
+        await api(`/api/mailboxes/${id}`, {method:"PATCH", body:JSON.stringify({label:item.label || "", note:item.note || "", api_active:!item.api_active})});
+        return refreshAfterWrite(item.api_active ? "接口已停用" : "接口已启用");
+      } catch (err) { say(err.message, false); }
+    });
+    return;
+  }
+  if (button.classList.contains("save-mailbox")) {
+    if (!item) return;
+    const form = button.parentElement;
+    await withBusy(button, async () => {
+      try {
+        await api(`/api/mailboxes/${id}`, {method:"PATCH", body:JSON.stringify({
+          label: form.querySelector(".edit-label").value,
+          note: form.querySelector(".edit-note").value,
+          api_active: !!item.api_active
+        })});
+        return refreshAfterWrite("邮箱资料已保存");
+      } catch (err) { say(err.message, false); }
+    });
+    return;
+  }
+  if (!button.classList.contains("delete-box")) return;
+  const remote = button.dataset.remote !== "0";
+  const localOnly = button.dataset.remote === "0" || button.dataset.localCleanup === "1";
+  const body = {
+    delete_remote: remote,
+    confirm_unknown: button.dataset.confirmUnknown === "1",
+    confirm_failed: button.dataset.confirmFailed === "1",
+    confirm_local: button.dataset.confirmLocal === "1"
+  };
+  const message = localOnly ? "只清理本地记录，不会访问 Apple。继续吗？" : "将先删除 iCloud 远端邮箱，成功后才删除本地记录。继续吗？";
+  if (!confirm(message)) return;
+  await withBusy(button, async () => {
+    try {
+      await api(`/api/mailboxes/${id}/delete`, {method:"POST", body:JSON.stringify(body)});
+      return refreshAfterWrite("已处理");
+    } catch (err) { say(err.message, false); }
+  });
+});
+$("export").onclick = () => withBusy($("export"), async () => {
+  const ids = Array.from(selectedIDs);
+  if (!ids.length) { say("请先勾选邮箱", false); return; }
+  try {
+    const response = await fetch("/api/mailboxes/export", {method:"POST", headers:{"Content-Type":"application/json","X-Requested-With":"icloud-mail"}, body:JSON.stringify({ids})});
+    if (!response.ok) {
+      let message = "导出失败";
+      try { const data = await response.json(); message = data.error || message; } catch { message = "导出失败"; }
+      say(message, false);
+      return;
+    }
+    const blob = await response.blob();
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "mailbox-apis.json";
+    link.click();
+    say("已导出，文件只含邮箱、接口地址和密钥", true);
+    try { await loadAll(); }
+    catch (err) { say("文件已下载，但刷新失败：" + err.message, false); }
+  } catch (err) {
+    say("导出失败：" + err.message, false);
+  }
+});
 $("save-settings").onclick = async () => {
+  const button = $("save-settings");
+  if (!settingsReady || button.disabled) return;
+  button.disabled = true;
   try {
     await api("/api/settings", {method:"PUT", body:JSON.stringify({
       public_api_enabled: $("public-api").value === "true",
@@ -418,9 +1014,16 @@ $("save-settings").onclick = async () => {
     })});
     $("api-key").value = "";
     $("apple-key").value = "";
-    $("settings-msg").textContent = "已保存";
-    $("settings-msg").className = "msg ok";
+    try {
+      await loadSettings();
+      $("settings-msg").textContent = "已保存";
+      $("settings-msg").className = "msg ok";
+    } catch (err) {
+      $("settings-msg").textContent = "已保存，但刷新失败：" + err.message;
+      $("settings-msg").className = "msg bad";
+    }
   } catch (err) {
+    if (settingsReady) button.disabled = false;
     $("settings-msg").textContent = err.message;
     $("settings-msg").className = "msg bad";
   }

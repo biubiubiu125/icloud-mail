@@ -41,6 +41,7 @@ type accountDetail struct {
 	WebLoginSaved          bool   `json:"web_login_saved"`
 	AppleAccountLoginSaved bool   `json:"apple_account_login_saved"`
 	IMAPSaved              bool   `json:"imap_saved"`
+	IMAPEmail              string `json:"imap_email,omitempty"`
 	ReconciliationRequired bool   `json:"reconciliation_required"`
 }
 
@@ -90,7 +91,7 @@ func accountDetailFrom(item domain.Account) (accountDetail, error) {
 		HasPassword:   item.HasPassword || strings.TrimSpace(item.ApplePassword) != "",
 		HasProxy:      strings.TrimSpace(item.ProxyURL) != "",
 		WebLoginSaved: item.WebLoginSaved, AppleAccountLoginSaved: item.AppleAccountLoginSaved,
-		IMAPSaved: item.IMAPSaved, ReconciliationRequired: item.ReconciliationRequired,
+		IMAPSaved: item.IMAPSaved, IMAPEmail: item.IMAPEmail, ReconciliationRequired: item.ReconciliationRequired,
 	}, nil
 }
 

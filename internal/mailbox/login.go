@@ -10,11 +10,17 @@ import (
 	"github.com/biubiubiu125/icloud-mail/internal/protocol"
 )
 
+const (
+	loginChannelWeb   = "web"
+	loginChannelApple = "apple"
+)
+
 type pendingOwner struct {
 	accountID      string
 	appleID        string
 	password       string
 	updatePassword bool
+	channel        string
 	expiresAt      time.Time
 }
 
@@ -37,13 +43,13 @@ func (s *Service) StartWebLogin(ctx context.Context, accountID, appleID, passwor
 	if err != nil {
 		return LoginResult{}, err
 	}
-	return s.finishStart(ctx, account, password, started)
+	return s.finishStart(ctx, account, password, started, loginChannelWeb)
 }
 
 func (s *Service) FinishWebLogin(ctx context.Context, accountID, pendingID, code string) (LoginResult, error) {
 	unlock := s.lockAccount(accountID)
 	defer unlock()
-	if err := s.pendingOwnedBy(pendingID, accountID); err != nil {
+	if err := s.pendingOwnedByChannel(pendingID, accountID, loginChannelWeb); err != nil {
 		return LoginResult{}, err
 	}
 	session, err := s.Auth.FinishICloudWebLogin(ctx, pendingID, code, s.Pending)
@@ -64,13 +70,13 @@ func (s *Service) StartAppleLogin(ctx context.Context, accountID, appleID, passw
 	if err != nil {
 		return LoginResult{}, err
 	}
-	return s.finishStart(ctx, account, password, started)
+	return s.finishStart(ctx, account, password, started, loginChannelApple)
 }
 
 func (s *Service) FinishAppleLogin(ctx context.Context, accountID, pendingID, code string) (LoginResult, error) {
 	unlock := s.lockAccount(accountID)
 	defer unlock()
-	if err := s.pendingOwnedBy(pendingID, accountID); err != nil {
+	if err := s.pendingOwnedByChannel(pendingID, accountID, loginChannelApple); err != nil {
 		return LoginResult{}, err
 	}
 	session, err := s.Auth.FinishAppleAccountLogin(ctx, pendingID, code, s.Pending)
@@ -134,7 +140,7 @@ func (s *Service) loginContext(ctx context.Context, accountID, appleID, password
 	return account.ProxyURL, account, nil
 }
 
-func (s *Service) finishStart(ctx context.Context, account domain.Account, password string, started protocol.LoginStart) (LoginResult, error) {
+func (s *Service) finishStart(ctx context.Context, account domain.Account, password string, started protocol.LoginStart, channel string) (LoginResult, error) {
 	updatePassword := strings.TrimSpace(password) != ""
 	if started.Needs2FA {
 		s.bindLoginPending(started.PendingID, pendingOwner{
@@ -142,6 +148,7 @@ func (s *Service) finishStart(ctx context.Context, account domain.Account, passw
 			appleID:        account.AppleID,
 			password:       password,
 			updatePassword: updatePassword,
+			channel:        channel,
 		})
 		return LoginResult{PendingID: started.PendingID, Needs2FA: true, Message: started.Message, AppleID: started.AppleID}, nil
 	}
@@ -182,6 +189,17 @@ func (s *Service) finishPending(ctx context.Context, accountID, pendingID string
 func (s *Service) pendingOwnedBy(pendingID, accountID string) error {
 	_, err := s.pendingOwnerFor(pendingID, accountID)
 	return err
+}
+
+func (s *Service) pendingOwnedByChannel(pendingID, accountID, channel string) error {
+	owner, err := s.pendingOwnerFor(pendingID, accountID)
+	if err != nil {
+		return err
+	}
+	if owner.channel == "" || owner.channel != channel {
+		return apperr.New(409, "login_pending_channel_mismatch", "这个验证码属于另一条登录，请点对应的提交按钮", true)
+	}
+	return nil
 }
 
 func (s *Service) pendingOwnerFor(pendingID, accountID string) (pendingOwner, error) {

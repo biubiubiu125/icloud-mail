@@ -37,6 +37,7 @@ type Account struct {
 	WebLoginSaved             bool       `json:"web_login_saved"`
 	AppleAccountLoginSaved    bool       `json:"apple_account_login_saved"`
 	IMAPSaved                 bool       `json:"imap_saved"`
+	IMAPEmail                 string     `json:"-"`
 	ReconciliationRequired    bool       `json:"reconciliation_required"`
 	ReconciliationAt          *time.Time `json:"reconciliation_at,omitempty"`
 	ReconciliationError       string     `json:"reconciliation_error,omitempty"`

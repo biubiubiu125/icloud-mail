@@ -1,6 +1,7 @@
 package mailbox
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -8,7 +9,74 @@ import (
 
 	"github.com/biubiubiu125/icloud-mail/internal/apperr"
 	"github.com/biubiubiu125/icloud-mail/internal/domain"
+	"github.com/biubiubiu125/icloud-mail/internal/protocol"
 )
+
+type channelAuth struct {
+	webCalls   int
+	appleCalls int
+}
+
+func (a *channelAuth) StartICloudWebLogin(context.Context, string, string, string, string, string, string, *protocol.PendingLogins) (protocol.LoginStart, error) {
+	return protocol.LoginStart{}, nil
+}
+func (a *channelAuth) FinishICloudWebLogin(context.Context, string, string, *protocol.PendingLogins) (protocol.ICloudSession, error) {
+	a.webCalls++
+	return protocol.ICloudSession{}, errors.New("should not finish")
+}
+func (a *channelAuth) StartAppleAccountLogin(context.Context, string, string, string, string, *protocol.PendingLogins) (protocol.LoginStart, error) {
+	return protocol.LoginStart{}, nil
+}
+func (a *channelAuth) FinishAppleAccountLogin(context.Context, string, string, *protocol.PendingLogins) (protocol.ICloudSession, error) {
+	a.appleCalls++
+	return protocol.ICloudSession{}, errors.New("should not finish")
+}
+
+func TestPendingFinishRejectsOtherChannel(t *testing.T) {
+	now := time.Now()
+	service := &Service{Now: func() time.Time { return now }}
+	service.bindLoginPending("pending-web", pendingOwner{
+		accountID: "acc-1",
+		channel:   loginChannelWeb,
+		expiresAt: now.Add(time.Minute),
+	})
+	if err := service.pendingOwnedByChannel("pending-web", "acc-1", loginChannelWeb); err != nil {
+		t.Fatal(err)
+	}
+	err := service.pendingOwnedByChannel("pending-web", "acc-1", loginChannelApple)
+	var appErr *apperr.Error
+	if err == nil || !errors.As(err, &appErr) || appErr.Code != "login_pending_channel_mismatch" {
+		t.Fatalf("other channel err = %v", err)
+	}
+}
+
+func TestFinishLoginDoesNotCrossChannel(t *testing.T) {
+	now := time.Now()
+	auth := &channelAuth{}
+	service := &Service{Now: func() time.Time { return now }, Auth: auth}
+	service.bindLoginPending("pending-web", pendingOwner{
+		accountID: "acc-1",
+		channel:   loginChannelWeb,
+		expiresAt: now.Add(time.Minute),
+	})
+	_, err := service.FinishAppleLogin(context.Background(), "acc-1", "pending-web", "123456")
+	var appErr *apperr.Error
+	if err == nil || !errors.As(err, &appErr) || appErr.Code != "login_pending_channel_mismatch" || auth.appleCalls != 0 || auth.webCalls != 0 {
+		t.Fatalf("err=%v web=%d apple=%d", err, auth.webCalls, auth.appleCalls)
+	}
+}
+
+func TestEffectivePublicBaseURLMatchesExportFallback(t *testing.T) {
+	if got := EffectivePublicBaseURL("https://settings.example/", "https://env.example"); got != "https://settings.example" {
+		t.Fatalf("stored base = %q", got)
+	}
+	if got := EffectivePublicBaseURL("  ", "https://env.example/"); got != "https://env.example" {
+		t.Fatalf("fallback base = %q", got)
+	}
+	if got := EffectivePublicBaseURL("", ""); got != "" {
+		t.Fatalf("empty base = %q", got)
+	}
+}
 
 func TestPendingOwnerRejectsOtherAccount(t *testing.T) {
 	now := time.Now()

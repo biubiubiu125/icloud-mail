@@ -64,10 +64,27 @@ func (s *Service) lockAccount(id string) func() {
 	return mu.Unlock
 }
 
+func (s *Service) tryLockAccount(id string) (func(), bool) {
+	value, _ := s.locks.LoadOrStore(id, &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	if !mu.TryLock() {
+		return nil, false
+	}
+	return mu.Unlock, true
+}
+
 func (s *Service) PublicBaseURL(ctx context.Context, fallback string) string {
 	settings, err := s.DB.GetSettings(ctx)
-	if err == nil && strings.TrimSpace(settings.PublicBaseURL) != "" {
-		return strings.TrimRight(settings.PublicBaseURL, "/")
+	stored := ""
+	if err == nil {
+		stored = settings.PublicBaseURL
+	}
+	return EffectivePublicBaseURL(stored, fallback)
+}
+
+func EffectivePublicBaseURL(stored, fallback string) string {
+	if strings.TrimSpace(stored) != "" {
+		return strings.TrimRight(strings.TrimSpace(stored), "/")
 	}
 	return strings.TrimRight(strings.TrimSpace(fallback), "/")
 }

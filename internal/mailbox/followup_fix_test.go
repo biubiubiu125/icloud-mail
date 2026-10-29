@@ -26,7 +26,7 @@ func TestTwoFactorStartDoesNotWriteAccount(t *testing.T) {
 		Needs2FA:  true,
 		PendingID: "pending-1",
 		AppleID:   "new@icloud.com",
-	})
+	}, loginChannelWeb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestTwoFactorStartDoesNotWriteAccount(t *testing.T) {
 		t.Fatal("pending owner missing")
 	}
 	owner, ok := value.(pendingOwner)
-	if !ok || owner.accountID != "acc-1" || owner.appleID != "new@icloud.com" || owner.password != "new-secret" || !owner.updatePassword {
+	if !ok || owner.accountID != "acc-1" || owner.appleID != "new@icloud.com" || owner.password != "new-secret" || !owner.updatePassword || owner.channel != loginChannelWeb {
 		t.Fatalf("pending=%+v", value)
 	}
 }
